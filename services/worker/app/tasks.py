@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
@@ -32,6 +33,7 @@ storage_client = RustFSStorageClient()
 embedding_provider = get_embedding_provider()
 openrouter_client = OpenRouterClient()
 neo4j_client = get_neo4j_client()
+logger = logging.getLogger(__name__)
 
 NEXT_STAGE: dict[str, str | None] = {
     "document.parse": "document.chunk",
@@ -40,6 +42,7 @@ NEXT_STAGE: dict[str, str | None] = {
     "graph.extract": "graph.upsert",
     "graph.upsert": None,
 }
+DEAD_LETTER_TASK_NAME = "document.dead_letter"
 
 
 def utcnow() -> datetime:
@@ -137,6 +140,135 @@ def enqueue_next_stage(
             raise
     finally:
         session.close()
+
+
+def schedule_retry(*, stage_name: str, job_id: str, document_id: str, error_message: str) -> None:
+    session = SessionLocal()
+    try:
+        job = session.get(ProcessingJob, job_id)
+        document = session.get(Document, document_id)
+        if job is not None:
+            job.status = JobStatus.QUEUED.value
+            job.error_message = error_message
+            job.completed_at = None
+            job.payload = {
+                **job.payload,
+                "last_retry_error": error_message,
+                "retry_scheduled_at": utcnow().isoformat(),
+            }
+            session.add(job)
+        if document is not None:
+            document.status = DocumentStatus.QUEUED.value
+            session.add(document)
+        session.commit()
+    finally:
+        session.close()
+
+
+def mark_dead_letter(
+    *,
+    stage_name: str,
+    job_id: str,
+    document_id: str,
+    tenant_id: str,
+    error_message: str,
+) -> None:
+    session = SessionLocal()
+    try:
+        job = session.get(ProcessingJob, job_id)
+        if job is not None:
+            job.payload = {
+                **job.payload,
+                "dead_letter": {
+                    "stage_name": stage_name,
+                    "queue_name": settings.worker_dead_letter_queue,
+                    "dead_lettered_at": utcnow().isoformat(),
+                    "tenant_id": tenant_id,
+                    "document_id": document_id,
+                    "error_message": error_message,
+                },
+            }
+            session.add(job)
+            session.commit()
+    finally:
+        session.close()
+
+
+def publish_dead_letter(
+    *,
+    stage_name: str,
+    job_id: str,
+    document_id: str,
+    tenant_id: str,
+    error_message: str,
+) -> None:
+    mark_dead_letter(
+        stage_name=stage_name,
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        error_message=error_message,
+    )
+    try:
+        celery_app.send_task(
+            DEAD_LETTER_TASK_NAME,
+            kwargs={
+                "stage_name": stage_name,
+                "job_id": job_id,
+                "document_id": document_id,
+                "tenant_id": tenant_id,
+                "error_message": error_message,
+            },
+            queue=settings.worker_dead_letter_queue,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to publish dead-letter event",
+            extra={"job_id": job_id, "document_id": document_id, "stage_name": stage_name},
+        )
+
+
+def execute_stage_task(
+    self,
+    *,
+    stage_name: str,
+    job_id: str,
+    document_id: str,
+    tenant_id: str,
+    next_stage: str | None,
+) -> dict:
+    try:
+        job, document = run_stage(stage_name, job_id, document_id)
+        if next_stage is not None:
+            enqueue_next_stage(current_job=job, document=document, next_stage=next_stage)
+        return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    except Exception as exc:
+        error_message = str(exc)
+        retry_attempt = self.request.retries + 1
+        if self.request.retries < settings.worker_task_max_retries:
+            schedule_retry(
+                stage_name=stage_name,
+                job_id=job_id,
+                document_id=document_id,
+                error_message=(
+                    f"Retry {retry_attempt}/{settings.worker_task_max_retries} scheduled: "
+                    f"{error_message}"
+                ),
+            )
+            raise self.retry(
+                exc=exc,
+                countdown=settings.worker_task_retry_delay_seconds,
+                max_retries=settings.worker_task_max_retries,
+            )
+
+        publish_dead_letter(
+            stage_name=stage_name,
+            job_id=job_id,
+            document_id=document_id,
+            tenant_id=tenant_id,
+            error_message=error_message,
+        )
+        raise
 
 
 def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[ProcessingJob, Document]:
@@ -482,33 +614,87 @@ def handle_graph_upsert_stage(session, document: Document, job: ProcessingJob) -
 
 @celery_app.task(name="document.parse", bind=True)
 def document_parse(self, job_id: str, document_id: str, tenant_id: str) -> dict:
-    job, document = run_stage("document.parse", job_id, document_id)
-    enqueue_next_stage(current_job=job, document=document, next_stage="document.chunk")
-    return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    return execute_stage_task(
+        self,
+        stage_name="document.parse",
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        next_stage="document.chunk",
+    )
 
 
 @celery_app.task(name="document.chunk", bind=True)
 def document_chunk(self, job_id: str, document_id: str, tenant_id: str) -> dict:
-    job, document = run_stage("document.chunk", job_id, document_id)
-    enqueue_next_stage(current_job=job, document=document, next_stage="document.embed")
-    return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    return execute_stage_task(
+        self,
+        stage_name="document.chunk",
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        next_stage="document.embed",
+    )
 
 
 @celery_app.task(name="document.embed", bind=True)
 def document_embed(self, job_id: str, document_id: str, tenant_id: str) -> dict:
-    job, document = run_stage("document.embed", job_id, document_id)
-    enqueue_next_stage(current_job=job, document=document, next_stage="graph.extract")
-    return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    return execute_stage_task(
+        self,
+        stage_name="document.embed",
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        next_stage="graph.extract",
+    )
 
 
 @celery_app.task(name="graph.extract", bind=True)
 def graph_extract(self, job_id: str, document_id: str, tenant_id: str) -> dict:
-    job, document = run_stage("graph.extract", job_id, document_id)
-    enqueue_next_stage(current_job=job, document=document, next_stage="graph.upsert")
-    return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    return execute_stage_task(
+        self,
+        stage_name="graph.extract",
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        next_stage="graph.upsert",
+    )
 
 
 @celery_app.task(name="graph.upsert", bind=True)
 def graph_upsert(self, job_id: str, document_id: str, tenant_id: str) -> dict:
-    run_stage("graph.upsert", job_id, document_id)
-    return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    return execute_stage_task(
+        self,
+        stage_name="graph.upsert",
+        job_id=job_id,
+        document_id=document_id,
+        tenant_id=tenant_id,
+        next_stage=None,
+    )
+
+
+@celery_app.task(name=DEAD_LETTER_TASK_NAME, bind=True)
+def document_dead_letter(
+    self,
+    stage_name: str,
+    job_id: str,
+    document_id: str,
+    tenant_id: str,
+    error_message: str,
+) -> dict:
+    logger.error(
+        "Dead-lettered processing job",
+        extra={
+            "stage_name": stage_name,
+            "job_id": job_id,
+            "document_id": document_id,
+            "tenant_id": tenant_id,
+            "error_message": error_message,
+        },
+    )
+    return {
+        "stage_name": stage_name,
+        "job_id": job_id,
+        "document_id": document_id,
+        "tenant_id": tenant_id,
+        "error_message": error_message,
+    }

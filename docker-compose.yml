@@ -145,7 +145,7 @@ services:
     command:
       - sh
       - -c
-      - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert
+      - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
     volumes:
       - hf_cache:/opt/hf-cache
     depends_on:

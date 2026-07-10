@@ -182,6 +182,7 @@ class UploadAcceptedResponse(BaseModel):
 
 class Citation(BaseModel):
     document_id: str
+    document_version_id: str | None = None
     title: str
     section: str
     page: int | None = None
@@ -193,6 +194,11 @@ class RetrievalChunk(BaseModel):
     score: float
     content: str
     source: Citation
+    retrieval_source: str = "vector"
+    vector_score: float | None = None
+    graph_score: float | None = None
+    final_score: float | None = None
+    supporting_entities: list[str] = Field(default_factory=list)
 
 
 class QueryRequest(BaseModel):

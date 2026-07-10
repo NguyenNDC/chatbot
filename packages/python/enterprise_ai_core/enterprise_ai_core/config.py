@@ -65,6 +65,20 @@ class ServiceSettings(BaseSettings):
     ocr_render_dpi: int = Field(default=220, alias="OCR_RENDER_DPI")
     tesseract_cmd: str = Field(default="", alias="TESSERACT_CMD")
     hf_home: str = Field(default="/opt/hf-cache", alias="HF_HOME")
+    worker_task_max_retries: int = Field(default=2, alias="WORKER_TASK_MAX_RETRIES")
+    worker_task_retry_delay_seconds: int = Field(
+        default=15, alias="WORKER_TASK_RETRY_DELAY_SECONDS"
+    )
+    worker_dead_letter_queue: str = Field(
+        default="document.dead_letter", alias="WORKER_DEAD_LETTER_QUEUE"
+    )
+    retrieval_graph_hops: int = Field(default=2, alias="RETRIEVAL_GRAPH_HOPS")
+    retrieval_graph_candidate_limit: int = Field(
+        default=12, alias="RETRIEVAL_GRAPH_CANDIDATE_LIMIT"
+    )
+    llm_context_max_chunks: int = Field(default=6, alias="LLM_CONTEXT_MAX_CHUNKS")
+    llm_context_char_budget: int = Field(default=8000, alias="LLM_CONTEXT_CHAR_BUDGET")
+    llm_answer_max_tokens: int = Field(default=900, alias="LLM_ANSWER_MAX_TOKENS")
 
 
 @lru_cache
