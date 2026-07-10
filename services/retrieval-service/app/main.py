@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from enterprise_ai_core.config import get_settings
+from enterprise_ai_core.db import init_db
 from enterprise_ai_core.logging import configure_logging
 
 from routers import health, retrieval
@@ -13,6 +14,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging(settings.service_name)
+    init_db()
     yield
 
 

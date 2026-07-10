@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -50,6 +51,7 @@ class DocumentVersion(Base):
 
     document: Mapped[Document] = relationship(back_populates="versions")
     artifacts: Mapped[list["DocumentArtifact"]] = relationship(back_populates="version")
+    chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="version")
 
 
 class DocumentArtifact(Base):
@@ -91,3 +93,55 @@ class ProcessingJob(Base):
     )
 
     document: Mapped[Document] = relationship(back_populates="jobs")
+
+
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    document_version_id: Mapped[str] = mapped_column(ForeignKey("document_versions.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(String(120), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    section_name: Mapped[str] = mapped_column(String(255), default="body")
+    page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    content: Mapped[str] = mapped_column(Text)
+    token_estimate: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    chunk_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    version: Mapped[DocumentVersion] = relationship(back_populates="chunks")
+    embedding: Mapped["ChunkEmbedding | None"] = relationship(
+        back_populates="chunk", uselist=False
+    )
+
+
+class ChunkEmbedding(Base):
+    __tablename__ = "chunk_embeddings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    document_chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("document_chunks.id"), unique=True, index=True
+    )
+    model_name: Mapped[str] = mapped_column(String(255), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    dimension: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1024))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    chunk: Mapped[DocumentChunk] = relationship(back_populates="embedding")
+
+
+class ChunkExtraction(Base):
+    __tablename__ = "chunk_extractions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    document_chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("document_chunks.id"), unique=True, index=True
+    )
+    model_name: Mapped[str] = mapped_column(String(255), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    extraction_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

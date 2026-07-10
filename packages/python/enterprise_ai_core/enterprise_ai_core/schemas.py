@@ -82,6 +82,93 @@ class ProcessingJobListResponse(BaseModel):
     total: int
 
 
+class CanonicalBlock(BaseModel):
+    id: str
+    block_type: str
+    order_index: int
+    heading: str | None = None
+    text: str
+    page_start: int | None = None
+    page_end: int | None = None
+    metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
+
+
+class CanonicalDocument(BaseModel):
+    document_id: str
+    document_version_id: str
+    tenant_id: str
+    title: str
+    source_format: str
+    language: str
+    ocr_required: bool = False
+    ocr_applied: bool = False
+    plain_text: str
+    blocks: list[CanonicalBlock]
+
+
+class ChunkItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    document_id: str
+    document_version_id: str
+    tenant_id: str
+    chunk_index: int
+    section_name: str
+    page_start: int | None = None
+    page_end: int | None = None
+    content: str
+    token_estimate: int
+    metadata: dict = Field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+class EmbeddingRecord(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    document_chunk_id: str
+    model_name: str
+    provider: str
+    dimension: int
+    created_at: datetime | None = None
+
+
+class EntityItem(BaseModel):
+    id: str
+    canonical_name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    attributes: dict = Field(default_factory=dict)
+
+
+class RelationItem(BaseModel):
+    id: str
+    source_entity_id: str
+    target_entity_id: str
+    relation_type: str
+    confidence: float = 0.0
+    evidence: str | None = None
+
+
+class ChunkExtractionPayload(BaseModel):
+    document_id: str
+    document_chunk_id: str
+    tenant_id: str
+    entities: list[EntityItem] = Field(default_factory=list)
+    relations: list[RelationItem] = Field(default_factory=list)
+    summary: str = ""
+
+
+class RuntimeHealthResponse(BaseModel):
+    service: str
+    runtime: str
+    status: Literal["ok", "degraded", "error"]
+    detail: str
+    metadata: dict = Field(default_factory=dict)
+
+
 class DocumentUploadResponse(BaseModel):
     document: DocumentItem
     root_job: ProcessingJobItem

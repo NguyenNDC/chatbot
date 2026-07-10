@@ -27,10 +27,13 @@ class ServiceSettings(BaseSettings):
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
     )
     openrouter_model_primary: str = Field(
-        default="anthropic/claude-3.7-sonnet", alias="OPENROUTER_MODEL_PRIMARY"
+        default="openai/gpt-oss-20b", alias="OPENROUTER_MODEL_PRIMARY"
     )
     openrouter_model_fallback: str = Field(
         default="openai/gpt-4.1-mini", alias="OPENROUTER_MODEL_FALLBACK"
+    )
+    openrouter_model_extraction: str = Field(
+        default="openai/gpt-oss-20b", alias="OPENROUTER_MODEL_EXTRACTION"
     )
 
     postgres_dsn: str = Field(
@@ -51,6 +54,17 @@ class ServiceSettings(BaseSettings):
         default="documents-artifacts", alias="RUSTFS_BUCKET_ARTIFACTS"
     )
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
+    chunk_target_tokens: int = Field(default=320, alias="CHUNK_TARGET_TOKENS")
+    chunk_overlap_tokens: int = Field(default=48, alias="CHUNK_OVERLAP_TOKENS")
+    embedding_provider: str = Field(default="bge-m3", alias="EMBEDDING_PROVIDER")
+    embedding_model_name: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL_NAME")
+    embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
+    ocr_engine: str = Field(default="tesseract", alias="OCR_ENGINE")
+    ocr_languages: str = Field(default="vie+eng", alias="OCR_LANGUAGES")
+    ocr_min_characters: int = Field(default=40, alias="OCR_MIN_CHARACTERS")
+    ocr_render_dpi: int = Field(default=220, alias="OCR_RENDER_DPI")
+    tesseract_cmd: str = Field(default="", alias="TESSERACT_CMD")
+    hf_home: str = Field(default="/opt/hf-cache", alias="HF_HOME")
 
 
 @lru_cache

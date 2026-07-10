@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import json
 
 import boto3
 from botocore.client import Config
@@ -53,3 +54,23 @@ class RustFSStorageClient:
             object_key=object_key,
             etag=response.get("ETag"),
         )
+
+    def upload_json(
+        self,
+        *,
+        bucket_name: str,
+        object_key: str,
+        payload: dict | list,
+        metadata: dict[str, str] | None = None,
+    ) -> StoredObject:
+        return self.upload_bytes(
+            bucket_name=bucket_name,
+            object_key=object_key,
+            payload=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
+            content_type="application/json",
+            metadata=metadata,
+        )
+
+    def download_bytes(self, *, bucket_name: str, object_key: str) -> bytes:
+        response = self._client.get_object(Bucket=bucket_name, Key=object_key)
+        return response["Body"].read()

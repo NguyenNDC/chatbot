@@ -3,17 +3,23 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from enterprise_ai_core.config import get_settings
+from enterprise_ai_core.graphdb import get_neo4j_client
 from enterprise_ai_core.logging import configure_logging
 
 from routers import graph, health
 
 settings = get_settings()
+neo4j_client = get_neo4j_client()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging(settings.service_name)
-    yield
+    neo4j_client.ensure_schema()
+    try:
+        yield
+    finally:
+        neo4j_client.close()
 
 
 app = FastAPI(

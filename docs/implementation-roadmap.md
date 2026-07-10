@@ -225,10 +225,27 @@ Definition of done:
 * Parsing, OCR, canonicalization và chunking
 * Embedding + PGVector
 
+Trạng thái hiện tại:
+
+* Đã có parser baseline cho `txt`, `md`, `html`, `pdf`, `docx`
+* Đã tích hợp Tesseract OCR cho image và scanned PDF
+* Đã có canonical JSON artifact và `chunks.json`
+* Đã có bảng `document_chunks` và `chunk_embeddings`
+* Retrieval đã đọc chunk/vector thật từ PostgreSQL
+* Đã bật BGE-M3 thật theo runtime hiện tại, nhưng cần môi trường đủ tài nguyên để load model ổn định
+
 ### Phase 3
 
 * Entity extraction + relation extraction qua OpenRouter
 * Build/update Neo4j
+
+Trạng thái hiện tại:
+
+* Đã có extraction structured output qua OpenRouter `openai/gpt-oss-20b`
+* Đã lưu extraction result theo chunk vào PostgreSQL và RustFS
+* Đã có Neo4j upsert cho `Document`, `Entity`, `MENTIONED_IN`, `RELATED_TO`
+* `graph-service` đã query neighbor và entity theo document từ Neo4j thật
+* Hybrid graph-aware retrieval đầy đủ vẫn để cho Phase 4
 
 ### Phase 4
 

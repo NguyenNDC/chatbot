@@ -59,12 +59,16 @@ services:
       args:
         SERVICE_PATH: services/retrieval-service/app
         SERVICE_PORT: 8002
+        PRELOAD_BGE_M3: "true"
     env_file: .env
     environment:
       SERVICE_NAME: retrieval-service
       SERVICE_PORT: 8002
+      HF_HOME: /opt/hf-cache
     ports:
       - "8002:8002"
+    volumes:
+      - hf_cache:/opt/hf-cache
     depends_on:
       - postgres
       - neo4j
@@ -109,12 +113,16 @@ services:
       args:
         SERVICE_PATH: services/worker/app
         SERVICE_PORT: 8005
+        PRELOAD_BGE_M3: "true"
     env_file: .env
     environment:
       SERVICE_NAME: worker
       SERVICE_PORT: 8005
+      HF_HOME: /opt/hf-cache
     ports:
       - "8005:8005"
+    volumes:
+      - hf_cache:/opt/hf-cache
     depends_on:
       - postgres
       - rabbitmq
@@ -128,14 +136,18 @@ services:
       args:
         SERVICE_PATH: services/worker/app
         SERVICE_PORT: 8005
+        PRELOAD_BGE_M3: "true"
     env_file: .env
     environment:
       SERVICE_NAME: worker-runner
       SERVICE_PORT: 8005
+      HF_HOME: /opt/hf-cache
     command:
       - sh
       - -c
       - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert
+    volumes:
+      - hf_cache:/opt/hf-cache
     depends_on:
       - postgres
       - rabbitmq
@@ -187,6 +199,7 @@ services:
       - rustfs_logs:/logs
 
 volumes:
+  hf_cache:
   neo4j_data:
   postgres_data:
   rustfs_data:
