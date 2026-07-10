@@ -1,18 +1,35 @@
 const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
 
+export type QueryMode = "auto" | "lookup" | "summary" | "compare" | "temporal";
+
 export type Citation = {
   document_id: string;
+  document_version_id?: string | null;
   title: string;
   section: string;
   page?: number | null;
   chunk_id: string;
 };
 
+export type RetrievalContext = {
+  chunk_id: string;
+  score: number;
+  content: string;
+  retrieval_source: string;
+  final_score?: number | null;
+  source: Citation;
+};
+
 export type QueryResult = {
   trace_id: string;
+  question: string;
   answer: string;
+  answer_type: string;
   citations: Citation[];
+  contexts: RetrievalContext[];
+  policy_summary: string[];
+  clarification_question?: string | null;
 };
 
 export type DocumentRecord = {
@@ -20,8 +37,10 @@ export type DocumentRecord = {
   tenant_id: string;
   title: string;
   file_name: string;
+  content_type: string;
   status: string;
   version: string;
+  tags?: string[];
   checksum_sha256?: string | null;
   size_bytes?: number | null;
   current_job_type?: string | null;
@@ -52,17 +71,32 @@ async function parseJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function askQuestion(question: string): Promise<QueryResult> {
+export async function askQuestion({
+  tenantId,
+  question,
+  queryMode,
+  topK,
+  includeGraph,
+  includeSummaries,
+}: {
+  tenantId: string;
+  question: string;
+  queryMode: QueryMode;
+  topK: number;
+  includeGraph: boolean;
+  includeSummaries: boolean;
+}): Promise<QueryResult> {
   return parseJson<QueryResult>(
     await fetch(`${apiBaseUrl}/api/v1/query`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        tenant_id: "tenant-demo",
+        tenant_id: tenantId,
         question,
-        top_k: 6,
-        include_graph: true,
-        include_summaries: true,
+        query_mode: queryMode,
+        top_k: topK,
+        include_graph: includeGraph,
+        include_summaries: includeSummaries,
       }),
     }),
   );

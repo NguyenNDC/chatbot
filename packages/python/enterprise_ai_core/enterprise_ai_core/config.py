@@ -37,7 +37,7 @@ class ServiceSettings(BaseSettings):
     )
 
     postgres_dsn: str = Field(
-        default="postgresql://postgres:postgres@localhost:5432/chatbot_graph",
+        default="postgresql+psycopg://postgres:postgres@localhost:5432/chatbot_graph",
         alias="POSTGRES_DSN",
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
@@ -45,6 +45,10 @@ class ServiceSettings(BaseSettings):
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
     neo4j_password: str = Field(default="graphpassword", alias="NEO4J_PASSWORD")
+    neo4j_connect_retries: int = Field(default=20, alias="NEO4J_CONNECT_RETRIES")
+    neo4j_connect_retry_delay_seconds: int = Field(
+        default=3, alias="NEO4J_CONNECT_RETRY_DELAY_SECONDS"
+    )
 
     rustfs_endpoint: str = Field(default="http://localhost:9000", alias="RUSTFS_ENDPOINT")
     rustfs_access_key: str = Field(default="admin", alias="RUSTFS_ACCESS_KEY")

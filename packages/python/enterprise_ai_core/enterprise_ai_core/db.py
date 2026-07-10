@@ -6,8 +6,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from .config import get_settings
 from .models import Base
 
+
+def _normalize_postgres_dsn(dsn: str) -> str:
+    if dsn.startswith("postgresql+psycopg://"):
+        return dsn
+    if dsn.startswith("postgresql://"):
+        return dsn.replace("postgresql://", "postgresql+psycopg://", 1)
+    if dsn.startswith("postgres://"):
+        return dsn.replace("postgres://", "postgresql+psycopg://", 1)
+    return dsn
+
+
 settings = get_settings()
-engine = create_engine(settings.postgres_dsn, pool_pre_ping=True, future=True)
+engine = create_engine(_normalize_postgres_dsn(settings.postgres_dsn), pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 

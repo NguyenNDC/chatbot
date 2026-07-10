@@ -4,6 +4,19 @@ import { useEffect, useState } from "react";
 
 import { fetchSystemOverview, type ServiceStatusMap } from "../lib/api";
 
+const serviceLabels: Record<string, string> = {
+  document_service: "Document service",
+  retrieval_service: "Retrieval service",
+  graph_service: "Graph service",
+  llm_service: "LLM orchestrator",
+  worker_service: "Worker control API",
+  "api-gateway": "API gateway",
+};
+
+function statusClassName(status: string) {
+  return status === "ok" ? "status-ok" : "status-warn";
+}
+
 export function SystemStatus() {
   const [services, setServices] = useState<ServiceStatusMap>({});
 
@@ -18,7 +31,7 @@ export function SystemStatus() {
       } catch {
         if (mounted) {
           setServices({
-            "api-gateway": { status: "unavailable", detail: "Gateway overview unavailable" },
+            "api-gateway": { status: "unavailable", detail: "Khong lay duoc system overview" },
           });
         }
       }
@@ -33,27 +46,27 @@ export function SystemStatus() {
     <section className="panel">
       <div className="panel-header">
         <div>
-          <h3>Service Health</h3>
-          <p className="muted">Runtime reachability from the gateway to downstream services.</p>
+          <h2>System Health</h2>
+          <p className="muted">Tinh trang ket noi tu gateway den cac backend trong flow nghiep vu.</p>
         </div>
-        <div className="pill">Live view</div>
+        <div className="pill">Gateway probe</div>
       </div>
+
       <div className="list-box">
         {Object.keys(services).length === 0 ? (
-          <div className="muted">Loading service status...</div>
+          <div className="muted">Dang tai service status...</div>
         ) : (
           Object.entries(services).map(([name, value]) => (
-            <div className="status-item" key={name}>
-              <strong>{name}</strong>
-              <div className={value.status === "ok" ? "status-ok" : "status-warn"}>
-                {value.status}
+            <article className="service-card" key={name}>
+              <div className="service-card-top">
+                <strong>{serviceLabels[name] ?? name}</strong>
+                <div className={statusClassName(value.status)}>{value.status}</div>
               </div>
-              {value.detail ? <div className="muted">{value.detail}</div> : null}
-            </div>
+              <div className="muted">{value.detail ?? "Healthy"}</div>
+            </article>
           ))
         )}
       </div>
     </section>
   );
 }
-

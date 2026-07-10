@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 ARG SERVICE_PATH
 ARG SERVICE_PORT=8000
-ARG PRELOAD_BGE_M3=false
+ARG REQUIREMENTS_GROUPS=base
+ARG INSTALL_OCR_SYSTEM_DEPS=false
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -15,23 +16,29 @@ ENV SENTENCE_TRANSFORMERS_HOME=/opt/hf-cache/sentence-transformers
 
 WORKDIR /app
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    tesseract-ocr-vie \
-    libgl1 \
-    libglib2.0-0 \
-  && rm -rf /var/lib/apt/lists/*
+RUN if [ "$INSTALL_OCR_SYSTEM_DEPS" = "true" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-vie \
+        libgl1 \
+        libglib2.0-0 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 
+COPY requirements /app/requirements
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN set -eux; \
+    for group in $(echo "$REQUIREMENTS_GROUPS" | tr ',' ' '); do \
+      pip install --no-cache-dir -r "/app/requirements/${group}.txt"; \
+    done
 
 COPY . /app
 
 RUN mkdir -p /opt/hf-cache
-RUN if [ "$PRELOAD_BGE_M3" = "true" ]; then python /app/infra/scripts/preload_bge_m3.py; fi
 
 EXPOSE ${SERVICE_PORT}
 
+ENTRYPOINT ["sh", "/app/infra/docker/entrypoint.sh"]
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${SERVICE_PORT} --app-dir ${SERVICE_PATH}"]

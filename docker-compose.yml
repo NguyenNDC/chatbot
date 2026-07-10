@@ -17,6 +17,7 @@ services:
       args:
         SERVICE_PATH: services/api-gateway/app
         SERVICE_PORT: 8000
+        REQUIREMENTS_GROUPS: base
     env_file: .env
     environment:
       SERVICE_NAME: api-gateway
@@ -41,6 +42,8 @@ services:
       args:
         SERVICE_PATH: services/document-service/app
         SERVICE_PORT: 8001
+        REQUIREMENTS_GROUPS: base,queue,storage,parsing
+        INSTALL_OCR_SYSTEM_DEPS: "true"
     env_file: .env
     environment:
       SERVICE_NAME: document-service
@@ -59,20 +62,24 @@ services:
       args:
         SERVICE_PATH: services/retrieval-service/app
         SERVICE_PORT: 8002
-        PRELOAD_BGE_M3: "true"
+        REQUIREMENTS_GROUPS: base,graph,ml
     env_file: .env
     environment:
       SERVICE_NAME: retrieval-service
       SERVICE_PORT: 8002
       HF_HOME: /opt/hf-cache
+      PRELOAD_BGE_M3: "true"
     ports:
       - "8002:8002"
     volumes:
       - hf_cache:/opt/hf-cache
     depends_on:
-      - postgres
-      - neo4j
-      - redis
+      postgres:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   graph-service:
     build:
@@ -81,6 +88,7 @@ services:
       args:
         SERVICE_PATH: services/graph-service/app
         SERVICE_PORT: 8003
+        REQUIREMENTS_GROUPS: base,graph
     env_file: .env
     environment:
       SERVICE_NAME: graph-service
@@ -88,7 +96,8 @@ services:
     ports:
       - "8003:8003"
     depends_on:
-      - neo4j
+      neo4j:
+        condition: service_healthy
 
   llm-orchestrator:
     build:
@@ -97,6 +106,7 @@ services:
       args:
         SERVICE_PATH: services/llm-orchestrator/app
         SERVICE_PORT: 8004
+        REQUIREMENTS_GROUPS: base
     env_file: .env
     environment:
       SERVICE_NAME: llm-orchestrator
@@ -113,21 +123,15 @@ services:
       args:
         SERVICE_PATH: services/worker/app
         SERVICE_PORT: 8005
-        PRELOAD_BGE_M3: "true"
+        REQUIREMENTS_GROUPS: base
     env_file: .env
     environment:
       SERVICE_NAME: worker
       SERVICE_PORT: 8005
-      HF_HOME: /opt/hf-cache
     ports:
       - "8005:8005"
-    volumes:
-      - hf_cache:/opt/hf-cache
     depends_on:
       - postgres
-      - rabbitmq
-      - redis
-      - rustfs
 
   worker-runner:
     build:
@@ -136,12 +140,14 @@ services:
       args:
         SERVICE_PATH: services/worker/app
         SERVICE_PORT: 8005
-        PRELOAD_BGE_M3: "true"
+        REQUIREMENTS_GROUPS: base,queue,storage,graph,parsing,ml
+        INSTALL_OCR_SYSTEM_DEPS: "true"
     env_file: .env
     environment:
       SERVICE_NAME: worker-runner
       SERVICE_PORT: 8005
       HF_HOME: /opt/hf-cache
+      PRELOAD_BGE_M3: "true"
     command:
       - sh
       - -c
@@ -149,10 +155,16 @@ services:
     volumes:
       - hf_cache:/opt/hf-cache
     depends_on:
-      - postgres
-      - rabbitmq
-      - redis
-      - rustfs
+      postgres:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
+      redis:
+        condition: service_started
+      rustfs:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
 
   postgres:
     image: pgvector/pgvector:pg17
@@ -180,6 +192,14 @@ services:
     image: neo4j:5.26
     environment:
       NEO4J_AUTH: neo4j/graphpassword
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - cypher-shell -a bolt://localhost:7687 -u neo4j -p graphpassword "RETURN 1;" || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
     ports:
       - "7474:7474"
       - "7687:7687"

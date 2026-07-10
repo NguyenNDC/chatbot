@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Enterprise Graph RAG Console",
-  description: "Operator dashboard for the enterprise chatbot knowledge platform.",
+  title: "Enterprise Chatbot Graph RAG",
+  description: "Dashboard van hanh cho ingest, retrieval, graph va answer policy.",
 };
 
 export default function RootLayout({
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="vi">
       <body>{children}</body>
     </html>
   );

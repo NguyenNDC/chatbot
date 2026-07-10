@@ -1,101 +1,340 @@
 # Enterprise Chatbot Graph RAG
 
-Production-oriented scaffold for an enterprise Graph RAG platform with:
+Monorepo cho mot he thong enterprise chatbot theo huong Graph RAG, gom luong ingest tai lieu, parse/chunk/embed, extract graph va generate cau tra loi co citation.
 
-- `apps/web`: Next.js 15 dashboard UI
-- `services/api-gateway`: orchestration entrypoint for frontend clients
-- `services/document-service`: document ingest metadata API
-- `services/retrieval-service`: retrieval planning and hybrid search stub
-- `services/graph-service`: graph exploration API stub
-- `services/llm-orchestrator`: OpenRouter-ready response orchestration
-- `services/worker`: worker control API and Celery task definitions
-- `packages/python/enterprise_ai_core`: shared Python settings, schemas and utilities
+## Kien truc nhanh
+
+- `apps/web`: giao dien Next.js cho upload tai lieu, theo doi job, hoi dap.
+- `services/api-gateway`: entrypoint cho frontend, gom flow upload/query va fan-out sang cac service backend.
+- `services/document-service`: nhan file, luu raw vao RustFS, quan ly document/version/job metadata trong PostgreSQL.
+- `services/retrieval-service`: lap retrieval plan, hybrid retrieval tu PGVector + graph signals.
+- `services/graph-service`: API tra cuu entity va quan he trong Neo4j.
+- `services/llm-orchestrator`: chuan hoa policy tra loi, no-answer, refusal, clarification va goi OpenRouter.
+- `services/worker`: API theo doi processing job.
+- `services/worker/app/tasks.py`: Celery pipeline chay nen cho parse/chunk/embed/extract/upsert.
+- `packages/python/enterprise_ai_core`: shared config, schema, DB model, queue, storage, parsing, embedding, prompting.
 
 ## Stack
 
 - Frontend: Next.js 15, React 19, TypeScript
 - Backend: FastAPI, Python 3.12
-- Queue: RabbitMQ
+- Queue: RabbitMQ + Celery
 - Cache: Redis
-- Vector store: PostgreSQL + PGVector (compose ships vanilla Postgres scaffold)
+- Metadata + vector: PostgreSQL + PGVector
 - Graph: Neo4j
-- Storage: RustFS
+- Object storage: RustFS
 - LLM gateway: OpenRouter
-- Default OpenRouter model: `openai/gpt-oss-20b`
+- Embedding mac dinh: `BAAI/bge-m3`
 
-## Quick Start
+## Cau truc dependency
 
-1. Copy `.env.example` to `.env`.
-2. Start the stack:
+Python dependencies da duoc tach theo nhom de tranh moi service phai keo ca OCR + ML stack:
+
+- `requirements/base.txt`: FastAPI, SQLAlchemy, config, HTTP client
+- `requirements/queue.txt`: Celery, Redis
+- `requirements/storage.txt`: boto3
+- `requirements/graph.txt`: neo4j
+- `requirements/parsing.txt`: PDF, DOCX, PPTX, OCR, HTML parsing
+- `requirements/ml.txt`: `FlagEmbedding`, `torch`, `sentencepiece`
+
+Root `requirements.txt` van include toan bo nhom de ai can cai full local van dung duoc.
+
+## Chay nhanh bang Docker
+
+Day la cach nen dung de chay full stack.
+
+### 1. Chuan bi env
+
+Copy file mau:
 
 ```bash
-docker compose up --build
+cp .env.example .env
 ```
 
-3. Open:
+Neu chay bang Docker Compose, giu cac hostname noi bo nhu `postgres`, `redis`, `neo4j`, `rustfs`.
 
-- Web UI: `http://localhost:3000`
+Bien quan trong nhat can set:
+
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_MODEL_PRIMARY`
+- `OPENROUTER_MODEL_FALLBACK`
+- `OPENROUTER_MODEL_EXTRACTION`
+
+### 2. Build va chay toan bo he thong
+
+```bash
+docker compose up -d --build
+```
+
+Service URLs:
+
+- Web: `http://localhost:3000`
 - API Gateway: `http://localhost:8000/docs`
 - Document Service: `http://localhost:8001/docs`
 - Retrieval Service: `http://localhost:8002/docs`
 - Graph Service: `http://localhost:8003/docs`
 - LLM Orchestrator: `http://localhost:8004/docs`
 - Worker API: `http://localhost:8005/docs`
+- RabbitMQ UI: `http://localhost:15672`
+- Neo4j Browser: `http://localhost:7474`
+- RustFS console: `http://localhost:9001`
 
-## Phase 1 Status
+### 3. Xem logs
 
-Phase 1 now includes:
+```bash
+docker compose logs -f api-gateway
+docker compose logs -f document-service
+docker compose logs -f worker-runner
+```
 
-- real multipart upload entrypoint through the gateway
-- raw file persistence into RustFS
-- PostgreSQL-backed metadata tables for documents, versions, artifacts and processing jobs
-- Celery + RabbitMQ job chaining for `document.parse -> document.chunk -> document.embed -> graph.extract -> graph.upsert`
-- worker control API for job inspection
+### 4. Rebuild mot service
 
-The Phase 1 foundation is fully wired into the later phases now, so the queue chain no longer stops at placeholder downstream tasks.
+```bash
+docker compose up -d --build retrieval-service
+docker compose up -d --build worker worker-runner
+```
 
-## Phase 2 Status
+## Chay local theo tung service
 
-Phase 2 now adds:
+Neu chay ngoai Docker, can doi cac host trong `.env` tu ten container sang `localhost`, vi du:
 
-- canonical parsing for `txt`, `md`, `html`, `pdf`, and `docx`
-- Tesseract OCR for image files and scanned PDFs
-- artifact persistence for `parsed.json` and `chunks.json` in RustFS
-- PostgreSQL-backed chunk storage
-- PGVector-backed embedding storage with real BGE-M3 embeddings
-- retrieval service reading real chunks and embeddings from Postgres
+- `POSTGRES_DSN=postgresql+psycopg://postgres:postgres@localhost:5432/chatbot_graph`
+- `REDIS_URL=redis://localhost:6379/0`
+- `RABBITMQ_URL=amqp://guest:guest@localhost:5672//`
+- `NEO4J_URI=bolt://localhost:7687`
+- `RUSTFS_ENDPOINT=http://localhost:9000`
 
-Current limits in this phase:
+Nen export `PYTHONPATH` de cac service thay shared package:
 
-- OCR quality depends on Tesseract language packs and source image quality
-- BGE-M3 is now the default embedding provider, which increases image size and startup time because the model runtime must be available inside the worker and retrieval containers
-- graph extraction and Neo4j upsert remain Phase 3 work
+```bash
+$env:PYTHONPATH = "D:\\chatbot\\packages\\python\\enterprise_ai_core"
+```
 
-## Runtime Hardening
+### Frontend
 
-- `retrieval-service`, `worker`, and `worker-runner` now share a Hugging Face cache volume at `/opt/hf-cache`
-- Docker can preload the BGE-M3 model during build through `PRELOAD_BGE_M3=true`
-- OCR health endpoint: `GET /health/ocr` on `document-service` and `worker`
-- Embedding health endpoint: `GET /health/embedding` on `retrieval-service` and `worker`
+```bash
+pnpm install
+pnpm dev:web
+```
 
-## Phase 3 Status
+### API Gateway
 
-Phase 3 now adds:
+```bash
+pip install -r requirements/base.txt
+uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir services/api-gateway/app
+```
 
-- OpenRouter-backed entity and relation extraction using `openai/gpt-oss-20b`
-- extraction persistence in PostgreSQL and `chunk-extractions.json` artifact storage in RustFS
-- Neo4j upsert for `Document`, `Entity`, `MENTIONED_IN`, and `RELATED_TO`
-- graph-service neighbors and document entities backed by real Neo4j queries
+### Document Service
 
-Current limits in this phase:
+```bash
+pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/parsing.txt
+uvicorn main:app --host 0.0.0.0 --port 8001 --app-dir services/document-service/app
+```
 
-- graph retrieval is not merged into hybrid retrieval yet; that remains Phase 4
-- answer generation in `llm-orchestrator` is still a placeholder response path
-- extraction quality depends on OpenRouter connectivity, the chosen provider behind `gpt-oss-20b`, and your domain prompt tuning
+### Retrieval Service
 
-## Notes
+```bash
+pip install -r requirements/base.txt -r requirements/graph.txt -r requirements/ml.txt
+uvicorn main:app --host 0.0.0.0 --port 8002 --app-dir services/retrieval-service/app
+```
 
-- This repo is a strong starter scaffold, not the full Graph RAG implementation.
-- The code already defines the service boundaries, request contracts and adapter seams for OpenRouter, RustFS, PGVector and Neo4j.
-- Phase 1 has replaced in-memory ingest metadata with PostgreSQL-backed persistence.
-- Phase 2 and Phase 3 are now scaffolded in code, but still need full runtime validation and quality tuning.
+### Graph Service
+
+```bash
+pip install -r requirements/base.txt -r requirements/graph.txt
+uvicorn main:app --host 0.0.0.0 --port 8003 --app-dir services/graph-service/app
+```
+
+### LLM Orchestrator
+
+```bash
+pip install -r requirements/base.txt
+uvicorn main:app --host 0.0.0.0 --port 8004 --app-dir services/llm-orchestrator/app
+```
+
+### Worker API
+
+```bash
+pip install -r requirements/base.txt
+uvicorn main:app --host 0.0.0.0 --port 8005 --app-dir services/worker/app
+```
+
+### Celery worker runner
+
+```bash
+pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/graph.txt -r requirements/parsing.txt -r requirements/ml.txt
+cd services/worker/app
+celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
+```
+
+## Database migration va schema
+
+Hien tai du an chua dung Alembic.
+
+Schema PostgreSQL dang duoc khoi tao theo kieu code-first:
+
+- moi service can DB se goi `init_db()`
+- `init_db()` se thu `CREATE EXTENSION IF NOT EXISTS vector`
+- sau do chay `Base.metadata.create_all(...)`
+
+Dieu do co nghia la:
+
+- voi moi truong moi, chi can bat service la bang se tu duoc tao
+- voi thay doi schema nho, co the restart service de tao them bang/cot moi neu model thay doi tuong thich
+- voi thay doi breaking schema, hien van can migration thu cong hoac reset volume database
+
+Khuyen nghi dev:
+
+- neu chi test flow moi tren moi truong local sach, xoa volume Postgres roi chay lai stack
+- neu du lieu can giu lai, tu viet SQL migration tay truoc khi restart service
+
+Neo4j schema/index duoc dam bao khi `graph-service` khoi dong. Buckets RustFS cung duoc `document-service` tao neu chua ton tai.
+
+## Flow tong the cua he thong
+
+### 1. Ingest tai lieu
+
+`web` goi `api-gateway`, gateway forward multipart upload sang `document-service`.
+
+`document-service` se:
+
+- luu file raw vao RustFS bucket `documents-raw`
+- tao `document`, `document_version`, `processing_job` trong PostgreSQL
+- gan version hien hanh cho document
+- publish job dau pipeline vao RabbitMQ
+
+### 2. Pipeline xu ly nen
+
+`worker-runner` chay chuoi Celery:
+
+1. `document.parse`
+2. `document.chunk`
+3. `document.embed`
+4. `graph.extract`
+5. `graph.upsert`
+
+Pipeline hien lam cac viec chinh:
+
+- parse `txt`, `md`, `html`, `pdf`, `docx`, `pptx`, `xlsx`, image OCR
+- sinh canonical document + parse report + provenance
+- chunk theo heading/text span, giu metadata va source offsets
+- reuse chunk theo content hash de ho tro incremental update co ban
+- embed chunk bang `bge-m3` va luu vector vao Postgres/PGVector
+- extract entity/relation qua OpenRouter
+- upsert document/entity/relation vao Neo4j theo version hien tai
+
+Artifacts duoc luu o RustFS bucket `documents-artifacts`.
+
+### 3. Query
+
+`web` goi `api-gateway /api/v1/query`.
+
+Gateway se:
+
+- gui `QueryRequest` sang `retrieval-service`
+- nhan contexts + retrieval plan
+- gui question + contexts sang `llm-orchestrator`
+- tra ve answer, answer type, policy summary, clarification question va citations
+
+### 4. Retrieval
+
+`retrieval-service` hien ho tro:
+
+- intent classification nhu `lookup`, `compare`, `summary`, `temporal`
+- query rewrite thanh sub-query
+- hybrid retrieval tu vector chunks va graph evidence
+- rerank va threshold de loc context yeu
+- filter theo `document_ids`, `version_ids`, `effective_at`
+
+### 5. Answer policy
+
+`llm-orchestrator` chuan hoa cac outcome:
+
+- `grounded`
+- `partial`
+- `no_answer`
+- `refusal`
+- `clarification`
+
+Muc tieu la tranh hallucination khi context yeu hoac cau hoi vi pham policy.
+
+## Flow tung service
+
+### `apps/web`
+
+- UI cho upload tai lieu
+- goi gateway de xem documents, versions, jobs
+- gui cau hoi va render answer kem citation
+
+### `services/api-gateway`
+
+- entrypoint duy nhat cho frontend
+- proxy/compose request toi `document-service`, `retrieval-service`, `llm-orchestrator`, `worker`
+- expose cac endpoint chinh:
+  - `GET /api/v1/documents`
+  - `GET /api/v1/documents/{document_id}/versions`
+  - `POST /api/v1/documents/upload`
+  - `POST /api/v1/documents/{document_id}/versions/upload`
+  - `POST /api/v1/documents/{document_id}/reprocess`
+  - `POST /api/v1/query`
+  - `GET /api/v1/jobs`
+  - `GET /api/v1/jobs/{job_id}`
+  - `GET /api/v1/system/overview`
+
+### `services/document-service`
+
+- nhan upload moi hoac upload version moi
+- chuan hoa metadata tai lieu
+- luu raw file vao RustFS
+- tao processing job
+- ho tro reprocess theo document/version
+- expose danh sach document va versions
+
+### `services/worker`
+
+- chi la control API cho processing jobs
+- build nhe, chi can `requirements/base.txt`
+- doc trang thai job tu PostgreSQL
+
+### `services/worker/app/tasks.py`
+
+- runtime thuc cua pipeline nen
+- duoc `worker-runner` su dung voi full ML/OCR stack
+- quan ly retry, dead-letter queue, artifact persistence
+- cap nhat trang thai tung stage trong `processing_jobs`
+
+### `services/retrieval-service`
+
+- nhan `POST /api/v1/retrieve`
+- lap retrieval plan
+- combine vector search, graph candidates, rerank
+- tra ve contexts da chuan hoa cho LLM layer
+
+### `services/graph-service`
+
+- expose graph inspection endpoints:
+  - `GET /api/v1/entities/{entity_name}/neighbors`
+  - `GET /api/v1/documents/{document_id}/entities`
+
+### `services/llm-orchestrator`
+
+- nhan `POST /api/v1/generate`
+- ap prompt/policy chuan
+- tra loi grounded neu context du tot
+- tra `no_answer`, `clarification` hoac `refusal` khi can
+
+## Mot so luu y van hanh
+
+- `retrieval-service` va `worker-runner` la cac container nang nhat vi can ML stack va model cache.
+- `document-service` va `worker-runner` can OCR system dependencies.
+- `worker` chi la control API nen da duoc tach ra de build nhe hon.
+- Lan build dau co the lau vi `torch`, `FlagEmbedding` va preload `bge-m3`.
+- Neu khong co `OPENROUTER_API_KEY`, flow extract/generate se khong hoan chinh.
+- Hien chua co migration framework chinh thuc, nen moi thay doi schema production can duoc kiem soat thu cong.
+
+## Health va kiem tra nhanh
+
+- `GET /health` tren moi service
+- `GET /health/ocr` tren `document-service`
+- `GET /health/embedding` tren `retrieval-service`
+- `GET /api/v1/system/overview` tren gateway de xem tinh trang toan he thong
