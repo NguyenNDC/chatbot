@@ -1,0 +1,55 @@
+from dataclasses import dataclass
+
+import boto3
+from botocore.client import Config
+from botocore.exceptions import ClientError
+
+from .config import get_settings
+
+
+@dataclass
+class StoredObject:
+    bucket_name: str
+    object_key: str
+    etag: str | None
+
+
+class RustFSStorageClient:
+    def __init__(self) -> None:
+        settings = get_settings()
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=settings.rustfs_endpoint,
+            aws_access_key_id=settings.rustfs_access_key,
+            aws_secret_access_key=settings.rustfs_secret_key,
+            region_name=settings.aws_region,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+
+    def ensure_bucket(self, bucket_name: str) -> None:
+        try:
+            self._client.head_bucket(Bucket=bucket_name)
+        except ClientError:
+            self._client.create_bucket(Bucket=bucket_name)
+
+    def upload_bytes(
+        self,
+        *,
+        bucket_name: str,
+        object_key: str,
+        payload: bytes,
+        content_type: str,
+        metadata: dict[str, str] | None = None,
+    ) -> StoredObject:
+        response = self._client.put_object(
+            Bucket=bucket_name,
+            Key=object_key,
+            Body=payload,
+            ContentType=content_type,
+            Metadata=metadata or {},
+        )
+        return StoredObject(
+            bucket_name=bucket_name,
+            object_key=object_key,
+            etag=response.get("ETag"),
+        )

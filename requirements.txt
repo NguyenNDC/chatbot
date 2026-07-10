@@ -1,0 +1,13 @@
+boto3>=1.39.9
+celery[rabbitmq]>=5.4.0
+fastapi>=0.116.0
+greenlet>=3.2.3
+httpx>=0.28.0
+orjson>=3.10.0
+psycopg[binary]>=3.2.9
+pydantic-settings>=2.10.0
+python-multipart>=0.0.20
+redis>=6.2.0
+SQLAlchemy>=2.0.41
+structlog>=25.4.0
+uvicorn[standard]>=0.35.0

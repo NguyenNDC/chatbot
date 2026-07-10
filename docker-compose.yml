@@ -1,0 +1,193 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/api-gateway/app
+        SERVICE_PORT: 8000
+    env_file: .env
+    environment:
+      SERVICE_NAME: api-gateway
+      SERVICE_PORT: 8000
+      DOCUMENT_SERVICE_URL: http://document-service:8001
+      RETRIEVAL_SERVICE_URL: http://retrieval-service:8002
+      GRAPH_SERVICE_URL: http://graph-service:8003
+      LLM_SERVICE_URL: http://llm-orchestrator:8004
+      WORKER_SERVICE_URL: http://worker:8005
+    ports:
+      - "8000:8000"
+    depends_on:
+      - document-service
+      - retrieval-service
+      - graph-service
+      - llm-orchestrator
+
+  document-service:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/document-service/app
+        SERVICE_PORT: 8001
+    env_file: .env
+    environment:
+      SERVICE_NAME: document-service
+      SERVICE_PORT: 8001
+    ports:
+      - "8001:8001"
+    depends_on:
+      - postgres
+      - rustfs
+      - rabbitmq
+
+  retrieval-service:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/retrieval-service/app
+        SERVICE_PORT: 8002
+    env_file: .env
+    environment:
+      SERVICE_NAME: retrieval-service
+      SERVICE_PORT: 8002
+    ports:
+      - "8002:8002"
+    depends_on:
+      - postgres
+      - neo4j
+      - redis
+
+  graph-service:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/graph-service/app
+        SERVICE_PORT: 8003
+    env_file: .env
+    environment:
+      SERVICE_NAME: graph-service
+      SERVICE_PORT: 8003
+    ports:
+      - "8003:8003"
+    depends_on:
+      - neo4j
+
+  llm-orchestrator:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/llm-orchestrator/app
+        SERVICE_PORT: 8004
+    env_file: .env
+    environment:
+      SERVICE_NAME: llm-orchestrator
+      SERVICE_PORT: 8004
+    ports:
+      - "8004:8004"
+    depends_on:
+      - redis
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/worker/app
+        SERVICE_PORT: 8005
+    env_file: .env
+    environment:
+      SERVICE_NAME: worker
+      SERVICE_PORT: 8005
+    ports:
+      - "8005:8005"
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+      - rustfs
+
+  worker-runner:
+    build:
+      context: .
+      dockerfile: infra/docker/python-service.Dockerfile
+      args:
+        SERVICE_PATH: services/worker/app
+        SERVICE_PORT: 8005
+    env_file: .env
+    environment:
+      SERVICE_NAME: worker-runner
+      SERVICE_PORT: 8005
+    command:
+      - sh
+      - -c
+      - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+      - rustfs
+
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: chatbot_graph
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  neo4j:
+    image: neo4j:5.26
+    environment:
+      NEO4J_AUTH: neo4j/graphpassword
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: admin
+      RUSTFS_SECRET_KEY: adminadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs_data:/data
+      - rustfs_logs:/logs
+
+volumes:
+  neo4j_data:
+  postgres_data:
+  rustfs_data:
+  rustfs_logs:
