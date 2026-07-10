@@ -1,5 +1,5 @@
-from enum import StrEnum
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Literal
 from uuid import uuid4
 
@@ -19,6 +19,14 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class AnswerDisposition(StrEnum):
+    GROUNDED = "grounded"
+    PARTIAL = "partial"
+    NO_ANSWER = "no_answer"
+    REFUSAL = "refusal"
+    CLARIFICATION = "clarification"
 
 
 class HealthResponse(BaseModel):
@@ -46,6 +54,24 @@ class DocumentItem(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class DocumentVersionItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    document_id: str
+    version_label: str
+    version_number: int
+    checksum_sha256: str
+    size_bytes: int
+    status: str
+    processing_scope: str
+    is_current: bool
+    effective_from: datetime
+    effective_to: datetime | None = None
+    parse_quality_score: float | None = None
+    created_at: datetime
+
+
 class DocumentCreateRequest(BaseModel):
     tenant_id: str
     title: str
@@ -56,6 +82,11 @@ class DocumentCreateRequest(BaseModel):
 
 class DocumentListResponse(BaseModel):
     items: list[DocumentItem]
+    total: int
+
+
+class DocumentVersionListResponse(BaseModel):
+    items: list[DocumentVersionItem]
     total: int
 
 
@@ -87,10 +118,19 @@ class CanonicalBlock(BaseModel):
     block_type: str
     order_index: int
     heading: str | None = None
+    heading_path: list[str] = Field(default_factory=list)
+    parent_block_id: str | None = None
     text: str
     page_start: int | None = None
     page_end: int | None = None
-    metadata: dict[str, str | int | bool | None] = Field(default_factory=dict)
+    source_offset_start: int | None = None
+    source_offset_end: int | None = None
+    table_id: str | None = None
+    row_index: int | None = None
+    cell_index: int | None = None
+    parse_quality_score: float | None = None
+    ocr_confidence: float | None = None
+    metadata: dict[str, str | int | float | bool | None | list[str]] = Field(default_factory=dict)
 
 
 class CanonicalDocument(BaseModel):
@@ -102,7 +142,10 @@ class CanonicalDocument(BaseModel):
     language: str
     ocr_required: bool = False
     ocr_applied: bool = False
+    parse_quality_score: float = 0.0
+    parse_warnings: list[str] = Field(default_factory=list)
     plain_text: str
+    metadata: dict[str, str | int | float | bool | None | list[str]] = Field(default_factory=dict)
     blocks: list[CanonicalBlock]
 
 
@@ -117,8 +160,12 @@ class ChunkItem(BaseModel):
     section_name: str
     page_start: int | None = None
     page_end: int | None = None
+    source_offset_start: int | None = None
+    source_offset_end: int | None = None
+    heading_path: list[str] = Field(default_factory=list)
     content: str
     token_estimate: int
+    parse_quality_score: float | None = None
     metadata: dict = Field(default_factory=dict)
     created_at: datetime | None = None
 
@@ -169,15 +216,17 @@ class RuntimeHealthResponse(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
-class DocumentUploadResponse(BaseModel):
-    document: DocumentItem
-    root_job: ProcessingJobItem
-
-
 class UploadAcceptedResponse(BaseModel):
     document: DocumentItem
     root_job: ProcessingJobItem
     object_key: str
+    version: DocumentVersionItem | None = None
+
+
+class DocumentReprocessRequest(BaseModel):
+    document_version_id: str | None = None
+    mode: Literal["incremental", "full"] = "incremental"
+    reason: str = "manual_reprocess"
 
 
 class Citation(BaseModel):
@@ -185,8 +234,10 @@ class Citation(BaseModel):
     document_version_id: str | None = None
     title: str
     section: str
+    section_path: list[str] = Field(default_factory=list)
     page: int | None = None
     chunk_id: str
+    block_id: str | None = None
 
 
 class RetrievalChunk(BaseModel):
@@ -197,8 +248,10 @@ class RetrievalChunk(BaseModel):
     retrieval_source: str = "vector"
     vector_score: float | None = None
     graph_score: float | None = None
+    re_rank_score: float | None = None
     final_score: float | None = None
     supporting_entities: list[str] = Field(default_factory=list)
+    query_path: list[str] = Field(default_factory=list)
 
 
 class QueryRequest(BaseModel):
@@ -207,25 +260,36 @@ class QueryRequest(BaseModel):
     top_k: int = 6
     include_graph: bool = True
     include_summaries: bool = True
+    query_mode: Literal["auto", "lookup", "summary", "compare", "temporal"] = "auto"
+    document_ids: list[str] = Field(default_factory=list)
+    version_ids: list[str] = Field(default_factory=list)
+    effective_at: datetime | None = None
 
 
 class QueryResponse(BaseModel):
     trace_id: str
     question: str
     answer: str
+    answer_type: AnswerDisposition = AnswerDisposition.GROUNDED
     citations: list[Citation]
     contexts: list[RetrievalChunk]
+    policy_summary: list[str] = Field(default_factory=list)
+    clarification_question: str | None = None
 
 
 class GenerateAnswerRequest(BaseModel):
     tenant_id: str
     question: str
     contexts: list[RetrievalChunk]
+    retrieval_plan: dict = Field(default_factory=dict)
 
 
 class GenerateAnswerResponse(BaseModel):
     trace_id: str
     model: str
     answer: str
+    answer_type: AnswerDisposition = AnswerDisposition.GROUNDED
     citations: list[Citation]
     policy_summary: list[str] = Field(default_factory=list)
+    clarification_question: str | None = None
+    refusal_reason: str | None = None

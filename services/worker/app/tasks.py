@@ -49,14 +49,23 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def get_current_version(session, document_id: str) -> DocumentVersion:
+def get_target_version(session, document_id: str, job: ProcessingJob) -> DocumentVersion:
+    version_id = job.payload.get("document_version_id")
+    if version_id:
+        version = session.get(DocumentVersion, version_id)
+        if version and version.document_id == document_id:
+            return version
+
     version = session.scalars(
         select(DocumentVersion)
         .where(DocumentVersion.document_id == document_id)
-        .order_by(DocumentVersion.created_at.desc())
+        .order_by(DocumentVersion.version_number.desc(), DocumentVersion.created_at.desc())
     ).first()
     if not version:
         raise ValueError(f"No document version found for document {document_id}")
+    job.payload = {**job.payload, "document_version_id": version.id, "version_label": version.version_label}
+    session.add(job)
+    session.flush()
     return version
 
 
@@ -69,6 +78,7 @@ def upsert_artifact(
     bucket_name: str,
     object_key: str,
     content_type: str,
+    artifact_metadata: dict | None = None,
 ) -> DocumentArtifact:
     artifact = session.scalars(
         select(DocumentArtifact).where(
@@ -80,6 +90,7 @@ def upsert_artifact(
         artifact.bucket_name = bucket_name
         artifact.object_key = object_key
         artifact.content_type = content_type
+        artifact.artifact_metadata = artifact_metadata or artifact.artifact_metadata
         session.add(artifact)
         return artifact
 
@@ -90,9 +101,27 @@ def upsert_artifact(
         bucket_name=bucket_name,
         object_key=object_key,
         content_type=content_type,
+        artifact_metadata=artifact_metadata or {},
     )
     session.add(artifact)
     return artifact
+
+
+def propagate_job_payload(current_job: ProcessingJob) -> dict:
+    propagated_keys = [
+        "document_version_id",
+        "version_label",
+        "processing_mode",
+        "reprocess_reason",
+        "chunk_ids_requiring_embedding",
+        "chunk_ids_requiring_extraction",
+        "chunk_count",
+        "chunk_delta",
+        "parse_quality_score",
+    ]
+    propagated = {key: current_job.payload[key] for key in propagated_keys if key in current_job.payload}
+    propagated["previous_job_id"] = current_job.id
+    return propagated
 
 
 def enqueue_next_stage(
@@ -110,7 +139,7 @@ def enqueue_next_stage(
             job_type=next_stage,
             queue_name=next_stage,
             status=JobStatus.QUEUED.value,
-            payload={"previous_job_id": current_job.id},
+            payload=propagate_job_payload(current_job),
         )
         session.add(next_job)
         session.commit()
@@ -147,16 +176,21 @@ def schedule_retry(*, stage_name: str, job_id: str, document_id: str, error_mess
     try:
         job = session.get(ProcessingJob, job_id)
         document = session.get(Document, document_id)
-        if job is not None:
-            job.status = JobStatus.QUEUED.value
-            job.error_message = error_message
-            job.completed_at = None
-            job.payload = {
-                **job.payload,
-                "last_retry_error": error_message,
-                "retry_scheduled_at": utcnow().isoformat(),
-            }
-            session.add(job)
+        if job is None:
+            return
+        version = get_target_version(session, document_id, job)
+        job.status = JobStatus.QUEUED.value
+        job.error_message = error_message
+        job.completed_at = None
+        job.payload = {
+            **job.payload,
+            "last_retry_error": error_message,
+            "retry_scheduled_at": utcnow().isoformat(),
+            "retry_stage_name": stage_name,
+        }
+        version.status = DocumentStatus.QUEUED.value
+        session.add(job)
+        session.add(version)
         if document is not None:
             document.status = DocumentStatus.QUEUED.value
             session.add(document)
@@ -189,7 +223,15 @@ def mark_dead_letter(
                 },
             }
             session.add(job)
-            session.commit()
+        document = session.get(Document, document_id)
+        if document is not None:
+            document.status = DocumentStatus.FAILED.value
+            session.add(document)
+        if job is not None:
+            version = get_target_version(session, document_id, job)
+            version.status = DocumentStatus.FAILED.value
+            session.add(version)
+        session.commit()
     finally:
         session.close()
 
@@ -279,24 +321,27 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         if not job or not document:
             raise ValueError(f"Job or document missing for stage {stage_name}")
 
+        version = get_target_version(session, document.id, job)
         job.status = JobStatus.RUNNING.value
         job.started_at = job.started_at or utcnow()
         job.attempts += 1
         document.status = DocumentStatus.PROCESSING.value
+        version.status = DocumentStatus.PROCESSING.value
         session.add(job)
         session.add(document)
+        session.add(version)
         session.commit()
 
         if stage_name == "document.parse":
-            handle_parse_stage(session, document, job)
+            handle_parse_stage(session, document, version, job)
         elif stage_name == "document.chunk":
-            handle_chunk_stage(session, document, job)
+            handle_chunk_stage(session, document, version, job)
         elif stage_name == "document.embed":
-            handle_embed_stage(session, document, job)
+            handle_embed_stage(session, document, version, job)
         elif stage_name == "graph.extract":
-            handle_graph_extract_stage(session, document, job)
+            handle_graph_extract_stage(session, document, version, job)
         elif stage_name == "graph.upsert":
-            handle_graph_upsert_stage(session, document, job)
+            handle_graph_upsert_stage(session, document, version, job)
 
         job.status = JobStatus.COMPLETED.value
         job.completed_at = utcnow()
@@ -305,7 +350,9 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         next_stage = NEXT_STAGE[stage_name]
         if next_stage is None:
             document.status = DocumentStatus.PROCESSED.value
+            version.status = DocumentStatus.PROCESSED.value
             session.add(document)
+            session.add(version)
             session.commit()
             session.expunge(job)
             session.expunge(document)
@@ -324,6 +371,9 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
             job.error_message = str(exc)
             job.completed_at = utcnow()
             session.add(job)
+            version = get_target_version(session, document_id, job)
+            version.status = DocumentStatus.FAILED.value
+            session.add(version)
         if document is not None:
             document.status = DocumentStatus.FAILED.value
             session.add(document)
@@ -333,8 +383,12 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         session.close()
 
 
-def handle_parse_stage(session, document: Document, job: ProcessingJob) -> None:
-    version = get_current_version(session, document.id)
+def handle_parse_stage(
+    session,
+    document: Document,
+    version: DocumentVersion,
+    job: ProcessingJob,
+) -> None:
     raw_payload = storage_client.download_bytes(
         bucket_name=version.bucket_name,
         object_key=version.object_key,
@@ -348,15 +402,14 @@ def handle_parse_stage(session, document: Document, job: ProcessingJob) -> None:
         content_type=document.content_type,
         payload=raw_payload,
     )
-    parsed_object_key = str(
+    base_path = (
         PurePosixPath(document.tenant_id)
         / "documents"
         / document.id
         / version.version_label
-        / "parsed"
-        / "parsed.json"
     )
-    stored = storage_client.upload_json(
+    parsed_object_key = str(base_path / "parsed" / "parsed.json")
+    parsed_stored = storage_client.upload_json(
         bucket_name=settings.rustfs_bucket_artifacts,
         object_key=parsed_object_key,
         payload=canonical_document.model_dump(mode="json"),
@@ -367,23 +420,66 @@ def handle_parse_stage(session, document: Document, job: ProcessingJob) -> None:
         document_id=document.id,
         document_version_id=version.id,
         artifact_type="parsed_canonical_json",
-        bucket_name=stored.bucket_name,
-        object_key=stored.object_key,
+        bucket_name=parsed_stored.bucket_name,
+        object_key=parsed_stored.object_key,
         content_type="application/json",
+        artifact_metadata={
+            "version_label": version.version_label,
+            "parse_quality_score": canonical_document.parse_quality_score,
+        },
     )
-    job.payload = {
-        **job.payload,
-        "parsed_artifact_bucket": stored.bucket_name,
-        "parsed_artifact_key": stored.object_key,
+
+    parse_report = {
+        "document_id": document.id,
+        "document_version_id": version.id,
+        "version_label": version.version_label,
+        "parse_quality_score": canonical_document.parse_quality_score,
+        "parse_warnings": canonical_document.parse_warnings,
         "ocr_required": canonical_document.ocr_required,
         "ocr_applied": canonical_document.ocr_applied,
         "language": canonical_document.language,
+        "block_count": len(canonical_document.blocks),
+        "metadata": canonical_document.metadata,
+    }
+    report_object_key = str(base_path / "parsed" / "parse-report.json")
+    report_stored = storage_client.upload_json(
+        bucket_name=settings.rustfs_bucket_artifacts,
+        object_key=report_object_key,
+        payload=parse_report,
+        metadata={"document_id": document.id, "artifact_type": "parse_report_json"},
+    )
+    upsert_artifact(
+        session=session,
+        document_id=document.id,
+        document_version_id=version.id,
+        artifact_type="parse_report_json",
+        bucket_name=report_stored.bucket_name,
+        object_key=report_stored.object_key,
+        content_type="application/json",
+        artifact_metadata={"version_label": version.version_label},
+    )
+    version.parse_quality_score = canonical_document.parse_quality_score
+    session.add(version)
+    job.payload = {
+        **job.payload,
+        "parsed_artifact_bucket": parsed_stored.bucket_name,
+        "parsed_artifact_key": parsed_stored.object_key,
+        "parse_report_bucket": report_stored.bucket_name,
+        "parse_report_key": report_stored.object_key,
+        "ocr_required": canonical_document.ocr_required,
+        "ocr_applied": canonical_document.ocr_applied,
+        "language": canonical_document.language,
+        "parse_quality_score": canonical_document.parse_quality_score,
     }
     session.add(job)
 
 
-def handle_chunk_stage(session, document: Document, job: ProcessingJob) -> None:
-    version = get_current_version(session, document.id)
+def handle_chunk_stage(
+    session,
+    document: Document,
+    version: DocumentVersion,
+    job: ProcessingJob,
+) -> None:
     parsed_artifact = session.scalars(
         select(DocumentArtifact).where(
             DocumentArtifact.document_version_id == version.id,
@@ -399,20 +495,51 @@ def handle_chunk_stage(session, document: Document, job: ProcessingJob) -> None:
     )
     canonical_document = CanonicalDocument.model_validate(json.loads(payload.decode("utf-8")))
     chunks = blocks_to_chunks(canonical_document)
-
-    session.execute(
-        delete(ChunkEmbedding).where(
-            ChunkEmbedding.document_chunk_id.in_(
-                select(DocumentChunk.id).where(DocumentChunk.document_version_id == version.id)
-            )
-        )
+    existing_chunk_rows = list(
+        session.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_version_id == version.id)
+            .order_by(DocumentChunk.chunk_index.asc())
+        ).all()
     )
-    session.execute(delete(DocumentChunk).where(DocumentChunk.document_version_id == version.id))
-    session.flush()
+    existing_by_hash: dict[str, list[DocumentChunk]] = {}
+    for row in existing_chunk_rows:
+        existing_by_hash.setdefault(row.content_hash, []).append(row)
 
-    chunk_rows: list[DocumentChunk] = []
+    retained_ids: set[str] = set()
+    reused_chunk_ids: list[str] = []
+    changed_chunk_ids: list[str] = []
+    processing_mode = str(job.payload.get("processing_mode", "full"))
+
     for chunk in chunks:
-        chunk_row = DocumentChunk(
+        content_digest = chunk_hash(chunk.content)
+        reusable = next(
+            (
+                candidate
+                for candidate in existing_by_hash.get(content_digest, [])
+                if candidate.id not in retained_ids
+            ),
+            None,
+        )
+        if reusable is not None:
+            reusable.chunk_index = chunk.chunk_index
+            reusable.section_name = chunk.section_name
+            reusable.page_start = chunk.page_start
+            reusable.page_end = chunk.page_end
+            reusable.source_offset_start = chunk.source_offset_start
+            reusable.source_offset_end = chunk.source_offset_end
+            reusable.heading_path = chunk.heading_path
+            reusable.content = chunk.content
+            reusable.token_estimate = chunk.token_estimate
+            reusable.content_hash = content_digest
+            reusable.parse_quality_score = chunk.parse_quality_score
+            reusable.chunk_metadata = chunk.metadata
+            session.add(reusable)
+            retained_ids.add(reusable.id)
+            reused_chunk_ids.append(reusable.id)
+            continue
+
+        row = DocumentChunk(
             id=chunk.id,
             document_id=chunk.document_id,
             document_version_id=chunk.document_version_id,
@@ -421,13 +548,39 @@ def handle_chunk_stage(session, document: Document, job: ProcessingJob) -> None:
             section_name=chunk.section_name,
             page_start=chunk.page_start,
             page_end=chunk.page_end,
+            source_offset_start=chunk.source_offset_start,
+            source_offset_end=chunk.source_offset_end,
+            heading_path=chunk.heading_path,
             content=chunk.content,
             token_estimate=chunk.token_estimate,
-            content_hash=chunk_hash(chunk.content),
+            content_hash=content_digest,
+            parse_quality_score=chunk.parse_quality_score,
             chunk_metadata=chunk.metadata,
+        )
+        session.add(row)
+        retained_ids.add(row.id)
+        changed_chunk_ids.append(row.id)
+
+    obsolete_ids = [row.id for row in existing_chunk_rows if row.id not in retained_ids]
+    if obsolete_ids:
+        session.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_chunk_id.in_(obsolete_ids)))
+        session.execute(delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_(obsolete_ids)))
+        session.execute(delete(DocumentChunk).where(DocumentChunk.id.in_(obsolete_ids)))
+
+    if processing_mode == "full":
+        reprocess_ids = list(retained_ids)
+        if reprocess_ids:
+            session.execute(
+                delete(ChunkEmbedding).where(ChunkEmbedding.document_chunk_id.in_(reprocess_ids))
             )
-        session.add(chunk_row)
-        chunk_rows.append(chunk_row)
+            session.execute(
+                delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_(reprocess_ids))
+            )
+        chunk_ids_requiring_embedding = reprocess_ids
+        chunk_ids_requiring_extraction = reprocess_ids
+    else:
+        chunk_ids_requiring_embedding = changed_chunk_ids
+        chunk_ids_requiring_extraction = changed_chunk_ids
 
     chunks_object_key = str(
         PurePosixPath(document.tenant_id)
@@ -451,27 +604,48 @@ def handle_chunk_stage(session, document: Document, job: ProcessingJob) -> None:
         bucket_name=stored.bucket_name,
         object_key=stored.object_key,
         content_type="application/json",
+        artifact_metadata={"version_label": version.version_label, "chunk_count": len(chunks)},
     )
     job.payload = {
         **job.payload,
-        "chunk_count": len(chunk_rows),
+        "chunk_count": len(chunks),
         "chunks_artifact_bucket": stored.bucket_name,
         "chunks_artifact_key": stored.object_key,
+        "chunk_ids_requiring_embedding": chunk_ids_requiring_embedding,
+        "chunk_ids_requiring_extraction": chunk_ids_requiring_extraction,
+        "chunk_delta": {
+            "new_or_changed": len(changed_chunk_ids),
+            "reused": len(reused_chunk_ids),
+            "removed": len(obsolete_ids),
+        },
     }
     session.add(job)
 
 
-def handle_embed_stage(session, document: Document, job: ProcessingJob) -> None:
-    version = get_current_version(session, document.id)
-    chunk_rows = list(
-        session.scalars(
-            select(DocumentChunk)
-            .where(DocumentChunk.document_version_id == version.id)
-            .order_by(DocumentChunk.chunk_index.asc())
-        ).all()
+def handle_embed_stage(
+    session,
+    document: Document,
+    version: DocumentVersion,
+    job: ProcessingJob,
+) -> None:
+    chunk_ids = list(job.payload.get("chunk_ids_requiring_embedding", []))
+    if not chunk_ids and str(job.payload.get("processing_mode", "full")) != "full":
+        job.payload = {**job.payload, "embedding_count": 0, "embedding_skipped": True}
+        session.add(job)
+        return
+
+    statement = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_version_id == version.id)
+        .order_by(DocumentChunk.chunk_index.asc())
     )
+    if chunk_ids:
+        statement = statement.where(DocumentChunk.id.in_(chunk_ids))
+    chunk_rows = list(session.scalars(statement).all())
     if not chunk_rows:
-        raise ValueError(f"No chunks found for document {document.id}")
+        job.payload = {**job.payload, "embedding_count": 0, "embedding_skipped": True}
+        session.add(job)
+        return
 
     vectors = embedding_provider.embed([chunk.content for chunk in chunk_rows])
     session.execute(
@@ -479,7 +653,6 @@ def handle_embed_stage(session, document: Document, job: ProcessingJob) -> None:
             ChunkEmbedding.document_chunk_id.in_([chunk.id for chunk in chunk_rows])
         )
     )
-
     for chunk_row, vector in zip(chunk_rows, vectors, strict=True):
         session.add(
             ChunkEmbedding(
@@ -499,23 +672,34 @@ def handle_embed_stage(session, document: Document, job: ProcessingJob) -> None:
     session.add(job)
 
 
-def handle_graph_extract_stage(session, document: Document, job: ProcessingJob) -> None:
-    version = get_current_version(session, document.id)
-    chunk_rows = list(
-        session.scalars(
-            select(DocumentChunk)
-            .where(DocumentChunk.document_version_id == version.id)
-            .order_by(DocumentChunk.chunk_index.asc())
-        ).all()
+def handle_graph_extract_stage(
+    session,
+    document: Document,
+    version: DocumentVersion,
+    job: ProcessingJob,
+) -> None:
+    chunk_ids = list(job.payload.get("chunk_ids_requiring_extraction", []))
+    if not chunk_ids and str(job.payload.get("processing_mode", "full")) != "full":
+        job.payload = {**job.payload, "extraction_count": 0, "extraction_skipped": True}
+        session.add(job)
+        return
+
+    statement = (
+        select(DocumentChunk)
+        .where(DocumentChunk.document_version_id == version.id)
+        .order_by(DocumentChunk.chunk_index.asc())
     )
+    if chunk_ids:
+        statement = statement.where(DocumentChunk.id.in_(chunk_ids))
+    chunk_rows = list(session.scalars(statement).all())
     if not chunk_rows:
-        raise ValueError(f"No chunks found for extraction on document {document.id}")
+        job.payload = {**job.payload, "extraction_count": 0, "extraction_skipped": True}
+        session.add(job)
+        return
 
     extracted_payloads: list[ChunkExtractionPayload] = []
     session.execute(
-        delete(ChunkExtraction).where(
-            ChunkExtraction.document_chunk_id.in_([chunk.id for chunk in chunk_rows])
-        )
+        delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_([chunk.id for chunk in chunk_rows]))
     )
     session.flush()
 
@@ -561,6 +745,7 @@ def handle_graph_extract_stage(session, document: Document, job: ProcessingJob) 
         bucket_name=stored.bucket_name,
         object_key=stored.object_key,
         content_type="application/json",
+        artifact_metadata={"version_label": version.version_label},
     )
     job.payload = {
         **job.payload,
@@ -572,8 +757,21 @@ def handle_graph_extract_stage(session, document: Document, job: ProcessingJob) 
     session.add(job)
 
 
-def handle_graph_upsert_stage(session, document: Document, job: ProcessingJob) -> None:
-    version = get_current_version(session, document.id)
+def handle_graph_upsert_stage(
+    session,
+    document: Document,
+    version: DocumentVersion,
+    job: ProcessingJob,
+) -> None:
+    if not version.is_current or document.version != version.version_label:
+        job.payload = {
+            **job.payload,
+            "graph_sync_skipped": True,
+            "graph_sync_skip_reason": "target_version_is_not_current",
+        }
+        session.add(job)
+        return
+
     chunk_rows = list(
         session.scalars(
             select(DocumentChunk)
@@ -608,6 +806,7 @@ def handle_graph_upsert_stage(session, document: Document, job: ProcessingJob) -
         **job.payload,
         "upserted_extraction_count": len(extraction_rows),
         "graph_backend": "neo4j",
+        "graph_version_label": version.version_label,
     }
     session.add(job)
 

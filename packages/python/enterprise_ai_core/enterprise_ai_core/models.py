@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -42,14 +42,30 @@ class DocumentVersion(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    parent_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document_versions.id"), nullable=True, index=True
+    )
     version_label: Mapped[str] = mapped_column(String(32), default="v1")
+    version_number: Mapped[int] = mapped_column(Integer, default=1, index=True)
     object_key: Mapped[str] = mapped_column(String(1024), unique=True)
     bucket_name: Mapped[str] = mapped_column(String(128))
     checksum_sha256: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    processing_scope: Mapped[str] = mapped_column(String(32), default="full")
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    parse_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
     document: Mapped[Document] = relationship(back_populates="versions")
+    parent_version: Mapped["DocumentVersion | None"] = relationship(
+        remote_side=lambda: DocumentVersion.id
+    )
     artifacts: Mapped[list["DocumentArtifact"]] = relationship(back_populates="version")
     chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="version")
 
@@ -64,6 +80,7 @@ class DocumentArtifact(Base):
     bucket_name: Mapped[str] = mapped_column(String(128))
     object_key: Mapped[str] = mapped_column(String(1024), unique=True)
     content_type: Mapped[str] = mapped_column(String(255))
+    artifact_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     version: Mapped[DocumentVersion] = relationship(back_populates="artifacts")
@@ -106,9 +123,13 @@ class DocumentChunk(Base):
     section_name: Mapped[str] = mapped_column(String(255), default="body")
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_offset_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_offset_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    heading_path: Mapped[list[str]] = mapped_column(JSON, default=list)
     content: Mapped[str] = mapped_column(Text)
     token_estimate: Mapped[int] = mapped_column(Integer)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    parse_quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     chunk_metadata: Mapped[dict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

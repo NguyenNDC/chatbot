@@ -54,6 +54,7 @@ class ServiceSettings(BaseSettings):
         default="documents-artifacts", alias="RUSTFS_BUCKET_ARTIFACTS"
     )
     aws_region: str = Field(default="us-east-1", alias="AWS_REGION")
+    document_max_upload_bytes: int = Field(default=50_000_000, alias="DOCUMENT_MAX_UPLOAD_BYTES")
     chunk_target_tokens: int = Field(default=320, alias="CHUNK_TARGET_TOKENS")
     chunk_overlap_tokens: int = Field(default=48, alias="CHUNK_OVERLAP_TOKENS")
     embedding_provider: str = Field(default="bge-m3", alias="EMBEDDING_PROVIDER")
@@ -76,9 +77,15 @@ class ServiceSettings(BaseSettings):
     retrieval_graph_candidate_limit: int = Field(
         default=12, alias="RETRIEVAL_GRAPH_CANDIDATE_LIMIT"
     )
+    retrieval_min_final_score: float = Field(
+        default=0.22, alias="RETRIEVAL_MIN_FINAL_SCORE"
+    )
+    retrieval_compare_extra_k: int = Field(default=4, alias="RETRIEVAL_COMPARE_EXTRA_K")
     llm_context_max_chunks: int = Field(default=6, alias="LLM_CONTEXT_MAX_CHUNKS")
     llm_context_char_budget: int = Field(default=8000, alias="LLM_CONTEXT_CHAR_BUDGET")
     llm_answer_max_tokens: int = Field(default=900, alias="LLM_ANSWER_MAX_TOKENS")
+    openrouter_timeout_seconds: int = Field(default=90, alias="OPENROUTER_TIMEOUT_SECONDS")
+    openrouter_max_retries: int = Field(default=2, alias="OPENROUTER_MAX_RETRIES")
 
 
 @lru_cache

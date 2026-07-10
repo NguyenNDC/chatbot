@@ -4,10 +4,13 @@ from .openrouter import OpenRouterClient
 from .queue import get_celery_app
 from .config import ServiceSettings
 from .schemas import (
+    AnswerDisposition,
     Citation,
     DocumentItem,
     DocumentListResponse,
-    DocumentUploadResponse,
+    DocumentReprocessRequest,
+    DocumentVersionItem,
+    DocumentVersionListResponse,
     GenerateAnswerRequest,
     GenerateAnswerResponse,
     HealthResponse,
@@ -20,10 +23,13 @@ from .schemas import (
 )
 
 __all__ = [
+    "AnswerDisposition",
     "Citation",
     "DocumentItem",
     "DocumentListResponse",
-    "DocumentUploadResponse",
+    "DocumentReprocessRequest",
+    "DocumentVersionItem",
+    "DocumentVersionListResponse",
     "GenerateAnswerRequest",
     "GenerateAnswerResponse",
     "get_celery_app",

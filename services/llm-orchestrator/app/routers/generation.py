@@ -4,7 +4,14 @@ from fastapi import APIRouter
 
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.openrouter import OpenRouterClient
+from enterprise_ai_core.prompting import (
+    CLARIFICATION_TEMPLATE,
+    NO_ANSWER_TEMPLATE,
+    REFUSAL_TEMPLATE,
+    build_answer_messages,
+)
 from enterprise_ai_core.schemas import (
+    AnswerDisposition,
     Citation,
     GenerateAnswerRequest,
     GenerateAnswerResponse,
@@ -24,42 +31,75 @@ ANSWER_RESPONSE_FORMAT = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
+                "answer_type": {
+                    "type": "string",
+                    "enum": ["grounded", "partial", "no_answer", "refusal", "clarification"],
+                },
                 "answer": {"type": "string"},
-                "citations": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "policy_summary": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "needs_more_context": {"type": "boolean"},
+                "citations": {"type": "array", "items": {"type": "string"}},
+                "policy_summary": {"type": "array", "items": {"type": "string"}},
+                "clarification_question": {"type": ["string", "null"]},
+                "refusal_reason": {"type": ["string", "null"]},
             },
-            "required": ["answer", "citations", "policy_summary", "needs_more_context"],
+            "required": [
+                "answer_type",
+                "answer",
+                "citations",
+                "policy_summary",
+                "clarification_question",
+                "refusal_reason",
+            ],
         },
     },
+}
+
+PROMPT_INJECTION_MARKERS = {
+    "ignore previous",
+    "ignore all previous",
+    "system prompt",
+    "developer message",
+    "bypass",
+    "reveal prompt",
 }
 
 
 @router.post("/generate", response_model=GenerateAnswerResponse)
 async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerResponse:
+    if is_prompt_injection_attempt(payload.question):
+        return GenerateAnswerResponse(
+            trace_id=str(uuid4()),
+            model="policy-refusal",
+            answer=REFUSAL_TEMPLATE,
+            answer_type=AnswerDisposition.REFUSAL,
+            citations=[],
+            policy_summary=["refusal", "prompt-injection-protection", "grounding-policy"],
+            refusal_reason="prompt_injection_suspected",
+        )
+
     if not payload.contexts:
         return GenerateAnswerResponse(
             trace_id=str(uuid4()),
             model="no-context",
-            answer=(
-                "Khong tim thay context phu hop trong tai lieu da nap, nen he thong khong the "
-                "dua ra cau tra loi co grounding."
-            ),
+            answer=NO_ANSWER_TEMPLATE,
+            answer_type=AnswerDisposition.NO_ANSWER,
             citations=[],
             policy_summary=["no-answer", "grounded-answer-only", "cite-source-required"],
         )
 
     selected_contexts = select_contexts(payload.contexts)
-    citation_map = {item.chunk_id: item.source for item in selected_contexts}
-    context_block = render_context_block(selected_contexts)
-    messages = build_messages(payload.question, context_block)
+    if needs_clarification(payload, selected_contexts):
+        return GenerateAnswerResponse(
+            trace_id=str(uuid4()),
+            model="clarification-policy",
+            answer=CLARIFICATION_TEMPLATE,
+            answer_type=AnswerDisposition.CLARIFICATION,
+            citations=[],
+            policy_summary=["clarification", "needs-more-context", "grounded-answer-only"],
+            clarification_question=build_clarification_question(payload.question),
+        )
 
+    citation_map = {item.chunk_id: item.source for item in selected_contexts}
+    messages = build_answer_messages(payload.question, selected_contexts, payload.retrieval_plan)
     model_name = settings.openrouter_model_primary
     answer_payload: dict | None = None
     for candidate_model in choose_models():
@@ -84,36 +124,39 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             trace_id=str(uuid4()),
             model="local-grounded-fallback",
             answer=fallback["answer"],
+            answer_type=fallback["answer_type"],
             citations=fallback["citations"],
             policy_summary=fallback["policy_summary"],
         )
 
-    answer_text = str(answer_payload.get("answer", "")).strip()
     citation_ids = [item for item in answer_payload.get("citations", []) if item in citation_map]
     citations = [citation_map[item] for item in citation_ids]
-    if not citations and selected_contexts:
+    disposition = parse_disposition(answer_payload.get("answer_type"))
+    answer_text = str(answer_payload.get("answer", "")).strip()
+
+    if disposition in {AnswerDisposition.GROUNDED, AnswerDisposition.PARTIAL} and not citations:
         citations = [selected_contexts[0].source]
     if not answer_text:
-        fallback = build_local_fallback(payload.question, selected_contexts)
-        answer_text = fallback["answer"]
-        citations = fallback["citations"]
+        answer_text = fallback_text_for(disposition)
 
-    policy_summary = [
-        str(item).strip()
-        for item in answer_payload.get("policy_summary", [])
-        if str(item).strip()
-    ]
+    policy_summary = dedupe_strings(
+        [str(item).strip() for item in answer_payload.get("policy_summary", []) if str(item).strip()]
+    )
     if not policy_summary:
-        policy_summary = ["grounded-answer-only", "cite-source-required"]
-    if answer_payload.get("needs_more_context"):
-        policy_summary.append("needs-more-context")
+        policy_summary = default_policy_summary(disposition)
+
+    clarification_question = normalize_optional_text(answer_payload.get("clarification_question"))
+    refusal_reason = normalize_optional_text(answer_payload.get("refusal_reason"))
 
     return GenerateAnswerResponse(
         trace_id=str(uuid4()),
         model=model_name,
         answer=answer_text,
+        answer_type=disposition,
         citations=citations,
-        policy_summary=dedupe_strings(policy_summary),
+        policy_summary=policy_summary,
+        clarification_question=clarification_question,
+        refusal_reason=refusal_reason,
     )
 
 
@@ -146,58 +189,38 @@ def select_contexts(contexts: list[RetrievalChunk]) -> list[RetrievalChunk]:
     return selected or ranked[:1]
 
 
-def render_context_block(contexts: list[RetrievalChunk]) -> str:
-    sections: list[str] = []
-    for index, context in enumerate(contexts, start=1):
-        supporting_entities = (
-            f"\nSupporting entities: {', '.join(context.supporting_entities)}"
-            if context.supporting_entities
-            else ""
-        )
-        sections.append(
-            "\n".join(
-                [
-                    f"[Context {index}]",
-                    f"Chunk ID: {context.chunk_id}",
-                    f"Document ID: {context.source.document_id}",
-                    f"Document Version: {context.source.document_version_id or 'unknown'}",
-                    f"Title: {context.source.title}",
-                    f"Section: {context.source.section}",
-                    f"Page: {context.source.page or 'n/a'}",
-                    f"Retrieval source: {context.retrieval_source}",
-                    f"Score: {context.final_score or context.score:.4f}{supporting_entities}",
-                    f"Content:\n{context.content}",
-                ]
-            )
-        )
-    return "\n\n".join(sections)
+def needs_clarification(payload: GenerateAnswerRequest, contexts: list[RetrievalChunk]) -> bool:
+    intent = str(payload.retrieval_plan.get("intent", "lookup"))
+    if intent != "compare":
+        return False
+    distinct_documents = {context.source.document_id for context in contexts}
+    return len(distinct_documents) < 2
 
 
-def build_messages(question: str, context_block: str) -> list[dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are a grounded enterprise assistant. Answer only from the provided contexts. "
-                "If the contexts are insufficient, say so clearly. Keep the answer concise, "
-                "cite chunk IDs that directly support the answer, and avoid inventing policies."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Question:\n{question}\n\n"
-                "Use only the contexts below. Return a structured grounded answer.\n\n"
-                f"{context_block}"
-            ),
-        },
-    ]
+def build_clarification_question(question: str) -> str:
+    return (
+        f"Cau hoi '{question}' can chi ro hai tai lieu, hai chinh sach hoac hai phien ban can so sanh."
+    )
+
+
+def is_prompt_injection_attempt(question: str) -> bool:
+    lowered = question.lower()
+    return any(marker in lowered for marker in PROMPT_INJECTION_MARKERS)
+
+
+def parse_disposition(raw_value: object) -> AnswerDisposition:
+    if isinstance(raw_value, str):
+        try:
+            return AnswerDisposition(raw_value)
+        except ValueError:
+            return AnswerDisposition.GROUNDED
+    return AnswerDisposition.GROUNDED
 
 
 def build_local_fallback(
     question: str,
     contexts: list[RetrievalChunk],
-) -> dict[str, str | list[str] | list[Citation]]:
+) -> dict[str, object]:
     top_contexts = contexts[:2]
     citations = [context.source for context in top_contexts]
     snippets = [trim_snippet(context.content) for context in top_contexts]
@@ -208,13 +231,31 @@ def build_local_fallback(
     )
     return {
         "answer": answer,
+        "answer_type": AnswerDisposition.PARTIAL,
         "citations": citations,
-        "policy_summary": [
-            "local-fallback",
-            "grounded-answer-only",
-            "cite-source-required",
-        ],
+        "policy_summary": ["local-fallback", "grounded-answer-only", "cite-source-required"],
     }
+
+
+def fallback_text_for(disposition: AnswerDisposition) -> str:
+    if disposition == AnswerDisposition.NO_ANSWER:
+        return NO_ANSWER_TEMPLATE
+    if disposition == AnswerDisposition.REFUSAL:
+        return REFUSAL_TEMPLATE
+    if disposition == AnswerDisposition.CLARIFICATION:
+        return CLARIFICATION_TEMPLATE
+    return "Khong tao duoc cau tra loi co cau truc tu model."
+
+
+def default_policy_summary(disposition: AnswerDisposition) -> list[str]:
+    mapping = {
+        AnswerDisposition.GROUNDED: ["grounded-answer-only", "cite-source-required"],
+        AnswerDisposition.PARTIAL: ["partial-answer", "grounded-answer-only"],
+        AnswerDisposition.NO_ANSWER: ["no-answer", "grounded-answer-only"],
+        AnswerDisposition.REFUSAL: ["refusal", "policy-precedence"],
+        AnswerDisposition.CLARIFICATION: ["clarification", "needs-more-context"],
+    }
+    return mapping[disposition]
 
 
 def trim_snippet(content: str, limit: int = 220) -> str:
@@ -234,3 +275,10 @@ def dedupe_strings(values: list[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None

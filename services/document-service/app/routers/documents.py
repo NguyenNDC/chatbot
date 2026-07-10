@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from uuid import uuid4
 
@@ -13,7 +14,10 @@ from enterprise_ai_core.queue import get_celery_app
 from enterprise_ai_core.schemas import (
     DocumentItem,
     DocumentListResponse,
+    DocumentReprocessRequest,
     DocumentStatus,
+    DocumentVersionItem,
+    DocumentVersionListResponse,
     JobStatus,
     ProcessingJobItem,
     UploadAcceptedResponse,
@@ -24,6 +28,10 @@ router = APIRouter(tags=["documents"])
 settings = get_settings()
 storage_client = RustFSStorageClient()
 celery_app = get_celery_app()
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def build_document_item(document: Document, latest_job: ProcessingJob | None) -> DocumentItem:
@@ -45,6 +53,10 @@ def build_document_item(document: Document, latest_job: ProcessingJob | None) ->
     )
 
 
+def build_version_item(version: DocumentVersion) -> DocumentVersionItem:
+    return DocumentVersionItem.model_validate(version)
+
+
 def latest_job_for_document(db: Session, document_id: str) -> ProcessingJob | None:
     statement = (
         select(ProcessingJob)
@@ -54,127 +66,53 @@ def latest_job_for_document(db: Session, document_id: str) -> ProcessingJob | No
     return db.scalars(statement).first()
 
 
-@router.get("/documents", response_model=DocumentListResponse)
-async def list_documents(db: Session = Depends(get_db_session)) -> DocumentListResponse:
-    statement = select(Document).order_by(Document.created_at.desc())
-    documents = list(db.scalars(statement).all())
-    items = [build_document_item(item, latest_job_for_document(db, item.id)) for item in documents]
-    return DocumentListResponse(items=items, total=len(items))
-
-
-@router.get("/documents/{document_id}", response_model=DocumentItem)
-async def get_document(document_id: str, db: Session = Depends(get_db_session)) -> DocumentItem:
-    document = db.get(Document, document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return build_document_item(document, latest_job_for_document(db, document.id))
-
-
-@router.post(
-    "/documents/upload",
-    response_model=UploadAcceptedResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def upload_document(
-    tenant_id: str = Form(...),
-    title: str = Form(...),
-    tags: str = Form(default=""),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db_session),
-) -> UploadAcceptedResponse:
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
-
-    checksum_sha256 = hashlib.sha256(payload).hexdigest()
-    existing_document = db.scalars(
-        select(Document).where(
-            Document.tenant_id == tenant_id, Document.checksum_sha256 == checksum_sha256
-        )
-    ).first()
-    if existing_document:
-        existing_job = latest_job_for_document(db, existing_document.id)
-        if not existing_job:
-            raise HTTPException(status_code=409, detail="Duplicate document exists without job")
-        return UploadAcceptedResponse(
-            document=build_document_item(existing_document, existing_job),
-            root_job=ProcessingJobItem.model_validate(existing_job),
-            object_key=db.scalars(
-                select(DocumentVersion.object_key).where(
-                    DocumentVersion.document_id == existing_document.id
-                )
-            ).first(),
-        )
-
-    normalized_tags = [item.strip() for item in tags.split(",") if item.strip()]
-    document_id = str(uuid4())
-    version_label = "v1"
-    file_name = file.filename or "upload.bin"
-    object_key = str(
-        PurePosixPath(tenant_id) / "documents" / document_id / version_label / "raw" / file_name
+def current_version_for_document(db: Session, document_id: str) -> DocumentVersion | None:
+    statement = (
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == document_id, DocumentVersion.is_current.is_(True))
+        .order_by(DocumentVersion.version_number.desc())
     )
+    version = db.scalars(statement).first()
+    if version is not None:
+        return version
+    return latest_version_for_document(db, document_id)
 
-    stored_object = storage_client.upload_bytes(
-        bucket_name=settings.rustfs_bucket_raw,
-        object_key=object_key,
-        payload=payload,
-        content_type=file.content_type or "application/octet-stream",
-        metadata={"tenant_id": tenant_id, "document_id": document_id},
-    )
 
-    document_version_id = str(uuid4())
+def latest_version_for_document(db: Session, document_id: str) -> DocumentVersion | None:
+    statement = (
+        select(DocumentVersion)
+        .where(DocumentVersion.document_id == document_id)
+        .order_by(DocumentVersion.version_number.desc(), DocumentVersion.created_at.desc())
+    )
+    return db.scalars(statement).first()
 
-    document = Document(
-        id=document_id,
-        tenant_id=tenant_id,
-        title=title,
-        file_name=file_name,
-        content_type=file.content_type or "application/octet-stream",
-        status=DocumentStatus.QUEUED.value,
-        version=version_label,
-        tags=normalized_tags,
-        source="rustfs",
-        checksum_sha256=checksum_sha256,
-        size_bytes=len(payload),
-    )
-    document_version = DocumentVersion(
-        id=document_version_id,
-        document_id=document_id,
-        version_label=version_label,
-        object_key=stored_object.object_key,
-        bucket_name=stored_object.bucket_name,
-        checksum_sha256=checksum_sha256,
-        size_bytes=len(payload),
-    )
-    artifact = DocumentArtifact(
-        document_id=document_id,
-        document_version_id=document_version_id,
-        artifact_type="raw_upload",
-        bucket_name=stored_object.bucket_name,
-        object_key=stored_object.object_key,
-        content_type=file.content_type or "application/octet-stream",
-    )
-    root_job = ProcessingJob(
-        tenant_id=tenant_id,
-        document_id=document_id,
-        job_type="document.parse",
-        queue_name="document.parse",
-        status=JobStatus.QUEUED.value,
-        payload={
-            "bucket_name": stored_object.bucket_name,
-            "object_key": stored_object.object_key,
-            "file_name": file_name,
-        },
-    )
 
-    db.add(document)
-    db.add(document_version)
-    db.add(artifact)
-    db.add(root_job)
-    db.commit()
-    db.refresh(root_job)
-    db.refresh(document)
+def next_version_info(db: Session, document_id: str) -> tuple[int, str, str | None]:
+    latest_version = latest_version_for_document(db, document_id)
+    next_number = (latest_version.version_number + 1) if latest_version else 1
+    return next_number, f"v{next_number}", latest_version.id if latest_version else None
 
+
+def parse_effective_from(raw_value: str | None) -> datetime:
+    if not raw_value:
+        return utcnow()
+    normalized = raw_value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid effective_from datetime") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def enqueue_root_job(
+    db: Session,
+    *,
+    root_job: ProcessingJob,
+    document: Document,
+    tenant_id: str,
+) -> None:
     try:
         task = celery_app.send_task(
             "document.parse",
@@ -193,10 +131,380 @@ async def upload_document(
         db.add(root_job)
         db.add(document)
         db.commit()
-        raise HTTPException(status_code=502, detail="Upload persisted but queue publish failed")
+        raise HTTPException(status_code=502, detail="Upload persisted but queue publish failed") from exc
 
+
+def persist_version_upload(
+    db: Session,
+    *,
+    document: Document,
+    tenant_id: str,
+    title: str,
+    tags: list[str],
+    upload_file: UploadFile,
+    payload: bytes,
+    effective_from: datetime,
+) -> tuple[DocumentVersion, ProcessingJob]:
+    checksum_sha256 = hashlib.sha256(payload).hexdigest()
+    for version in document.versions:
+        if version.checksum_sha256 == checksum_sha256:
+            existing_job = latest_job_for_document(db, document.id)
+            if not existing_job:
+                raise HTTPException(status_code=409, detail="Duplicate document version exists without job")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "document_id": document.id,
+                    "document_version_id": version.id,
+                    "message": "Duplicate version checksum already exists",
+                },
+            )
+
+    version_number, version_label, parent_version_id = next_version_info(db, document.id)
+    file_name = upload_file.filename or document.file_name or "upload.bin"
+    object_key = str(
+        PurePosixPath(tenant_id) / "documents" / document.id / version_label / "raw" / file_name
+    )
+
+    stored_object = storage_client.upload_bytes(
+        bucket_name=settings.rustfs_bucket_raw,
+        object_key=object_key,
+        payload=payload,
+        content_type=upload_file.content_type or "application/octet-stream",
+        metadata={"tenant_id": tenant_id, "document_id": document.id, "version_label": version_label},
+    )
+
+    current_version = current_version_for_document(db, document.id)
+    if current_version is not None:
+        current_version.is_current = False
+        current_version.effective_to = effective_from
+        db.add(current_version)
+
+    document_version_id = str(uuid4())
+    version = DocumentVersion(
+        id=document_version_id,
+        document_id=document.id,
+        parent_version_id=parent_version_id,
+        version_label=version_label,
+        version_number=version_number,
+        object_key=stored_object.object_key,
+        bucket_name=stored_object.bucket_name,
+        checksum_sha256=checksum_sha256,
+        size_bytes=len(payload),
+        status=DocumentStatus.QUEUED.value,
+        processing_scope="full",
+        is_current=True,
+        effective_from=effective_from,
+    )
+    artifact = DocumentArtifact(
+        document_id=document.id,
+        document_version_id=document_version_id,
+        artifact_type="raw_upload",
+        bucket_name=stored_object.bucket_name,
+        object_key=stored_object.object_key,
+        content_type=upload_file.content_type or "application/octet-stream",
+        artifact_metadata={"version_label": version_label, "checksum_sha256": checksum_sha256},
+    )
+
+    document.title = title
+    document.file_name = file_name
+    document.content_type = upload_file.content_type or "application/octet-stream"
+    document.status = DocumentStatus.QUEUED.value
+    document.version = version_label
+    document.tags = tags
+    document.source = "rustfs"
+    document.checksum_sha256 = checksum_sha256
+    document.size_bytes = len(payload)
+    db.add(document)
+    db.add(version)
+    db.add(artifact)
+    db.flush()
+
+    root_job = ProcessingJob(
+        tenant_id=tenant_id,
+        document_id=document.id,
+        job_type="document.parse",
+        queue_name="document.parse",
+        status=JobStatus.QUEUED.value,
+        payload={
+            "bucket_name": stored_object.bucket_name,
+            "object_key": stored_object.object_key,
+            "file_name": file_name,
+            "document_version_id": version.id,
+            "version_label": version_label,
+            "processing_mode": "full",
+        },
+    )
+    db.add(root_job)
+    db.commit()
+    db.refresh(version)
+    db.refresh(root_job)
+    db.refresh(document)
+    return version, root_job
+
+
+def create_root_document(
+    *,
+    tenant_id: str,
+    title: str,
+    file_name: str,
+    content_type: str,
+    tags: list[str],
+    checksum_sha256: str,
+    size_bytes: int,
+) -> Document:
+    return Document(
+        id=str(uuid4()),
+        tenant_id=tenant_id,
+        title=title,
+        file_name=file_name,
+        content_type=content_type,
+        status=DocumentStatus.QUEUED.value,
+        version="v1",
+        tags=tags,
+        source="rustfs",
+        checksum_sha256=checksum_sha256,
+        size_bytes=size_bytes,
+    )
+
+
+@router.get("/documents", response_model=DocumentListResponse)
+async def list_documents(db: Session = Depends(get_db_session)) -> DocumentListResponse:
+    statement = select(Document).order_by(Document.created_at.desc())
+    documents = list(db.scalars(statement).all())
+    items = [build_document_item(item, latest_job_for_document(db, item.id)) for item in documents]
+    return DocumentListResponse(items=items, total=len(items))
+
+
+@router.get("/documents/{document_id}", response_model=DocumentItem)
+async def get_document(document_id: str, db: Session = Depends(get_db_session)) -> DocumentItem:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return build_document_item(document, latest_job_for_document(db, document.id))
+
+
+@router.get("/documents/{document_id}/versions", response_model=DocumentVersionListResponse)
+async def list_document_versions(
+    document_id: str,
+    db: Session = Depends(get_db_session),
+) -> DocumentVersionListResponse:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    versions = list(
+        db.scalars(
+            select(DocumentVersion)
+            .where(DocumentVersion.document_id == document_id)
+            .order_by(DocumentVersion.version_number.desc())
+        ).all()
+    )
+    items = [build_version_item(item) for item in versions]
+    return DocumentVersionListResponse(items=items, total=len(items))
+
+
+@router.post(
+    "/documents/upload",
+    response_model=UploadAcceptedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_document(
+    tenant_id: str = Form(...),
+    title: str = Form(...),
+    tags: str = Form(default=""),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db_session),
+) -> UploadAcceptedResponse:
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(payload) > settings.document_max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Uploaded file exceeds max configured size")
+
+    checksum_sha256 = hashlib.sha256(payload).hexdigest()
+    existing_document = db.scalars(
+        select(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.checksum_sha256 == checksum_sha256,
+        )
+    ).first()
+    if existing_document:
+        existing_job = latest_job_for_document(db, existing_document.id)
+        existing_version = current_version_for_document(db, existing_document.id)
+        if not existing_job or not existing_version:
+            raise HTTPException(status_code=409, detail="Duplicate document exists without job")
+        return UploadAcceptedResponse(
+            document=build_document_item(existing_document, existing_job),
+            root_job=ProcessingJobItem.model_validate(existing_job),
+            object_key=existing_version.object_key,
+            version=build_version_item(existing_version),
+        )
+
+    normalized_tags = [item.strip() for item in tags.split(",") if item.strip()]
+    file_name = file.filename or "upload.bin"
+    document = create_root_document(
+        tenant_id=tenant_id,
+        title=title,
+        file_name=file_name,
+        content_type=file.content_type or "application/octet-stream",
+        tags=normalized_tags,
+        checksum_sha256=checksum_sha256,
+        size_bytes=len(payload),
+    )
+    db.add(document)
+    db.flush()
+
+    version = DocumentVersion(
+        id=str(uuid4()),
+        document_id=document.id,
+        version_label="v1",
+        version_number=1,
+        object_key=str(PurePosixPath(tenant_id) / "documents" / document.id / "v1" / "raw" / file_name),
+        bucket_name=settings.rustfs_bucket_raw,
+        checksum_sha256=checksum_sha256,
+        size_bytes=len(payload),
+        status=DocumentStatus.QUEUED.value,
+        processing_scope="full",
+        is_current=True,
+        effective_from=utcnow(),
+    )
+    stored_object = storage_client.upload_bytes(
+        bucket_name=settings.rustfs_bucket_raw,
+        object_key=version.object_key,
+        payload=payload,
+        content_type=file.content_type or "application/octet-stream",
+        metadata={"tenant_id": tenant_id, "document_id": document.id, "version_label": "v1"},
+    )
+    version.object_key = stored_object.object_key
+    version.bucket_name = stored_object.bucket_name
+    artifact = DocumentArtifact(
+        document_id=document.id,
+        document_version_id=version.id,
+        artifact_type="raw_upload",
+        bucket_name=stored_object.bucket_name,
+        object_key=stored_object.object_key,
+        content_type=file.content_type or "application/octet-stream",
+        artifact_metadata={"version_label": "v1", "checksum_sha256": checksum_sha256},
+    )
+    root_job = ProcessingJob(
+        tenant_id=tenant_id,
+        document_id=document.id,
+        job_type="document.parse",
+        queue_name="document.parse",
+        status=JobStatus.QUEUED.value,
+        payload={
+            "bucket_name": stored_object.bucket_name,
+            "object_key": stored_object.object_key,
+            "file_name": file_name,
+            "document_version_id": version.id,
+            "version_label": "v1",
+            "processing_mode": "full",
+        },
+    )
+
+    db.add(version)
+    db.add(artifact)
+    db.add(root_job)
+    db.commit()
+    db.refresh(root_job)
+    db.refresh(document)
+    db.refresh(version)
+
+    enqueue_root_job(db, root_job=root_job, document=document, tenant_id=tenant_id)
     return UploadAcceptedResponse(
         document=build_document_item(document, root_job),
         root_job=ProcessingJobItem.model_validate(root_job),
         object_key=stored_object.object_key,
+        version=build_version_item(version),
     )
+
+
+@router.post(
+    "/documents/{document_id}/versions/upload",
+    response_model=UploadAcceptedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_document_version(
+    document_id: str,
+    title: str | None = Form(default=None),
+    tags: str = Form(default=""),
+    effective_from: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db_session),
+) -> UploadAcceptedResponse:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if len(payload) > settings.document_max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Uploaded file exceeds max configured size")
+
+    normalized_tags = [item.strip() for item in tags.split(",") if item.strip()] or document.tags
+    version, root_job = persist_version_upload(
+        db,
+        document=document,
+        tenant_id=document.tenant_id,
+        title=title or document.title,
+        tags=normalized_tags,
+        upload_file=file,
+        payload=payload,
+        effective_from=parse_effective_from(effective_from),
+    )
+    enqueue_root_job(db, root_job=root_job, document=document, tenant_id=document.tenant_id)
+    return UploadAcceptedResponse(
+        document=build_document_item(document, root_job),
+        root_job=ProcessingJobItem.model_validate(root_job),
+        object_key=version.object_key,
+        version=build_version_item(version),
+    )
+
+
+@router.post("/documents/{document_id}/reprocess", response_model=ProcessingJobItem)
+async def reprocess_document(
+    document_id: str,
+    payload: DocumentReprocessRequest,
+    db: Session = Depends(get_db_session),
+) -> ProcessingJobItem:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    target_version = (
+        db.get(DocumentVersion, payload.document_version_id)
+        if payload.document_version_id
+        else current_version_for_document(db, document_id)
+    )
+    if not target_version or target_version.document_id != document_id:
+        raise HTTPException(status_code=404, detail="Document version not found")
+
+    document.status = DocumentStatus.QUEUED.value
+    target_version.status = DocumentStatus.QUEUED.value
+    target_version.processing_scope = payload.mode
+    db.add(document)
+    db.add(target_version)
+
+    root_job = ProcessingJob(
+        tenant_id=document.tenant_id,
+        document_id=document.id,
+        job_type="document.parse",
+        queue_name="document.parse",
+        status=JobStatus.QUEUED.value,
+        payload={
+            "bucket_name": target_version.bucket_name,
+            "object_key": target_version.object_key,
+            "file_name": document.file_name,
+            "document_version_id": target_version.id,
+            "version_label": target_version.version_label,
+            "processing_mode": payload.mode,
+            "reprocess_reason": payload.reason,
+        },
+    )
+    db.add(root_job)
+    db.commit()
+    db.refresh(root_job)
+    db.refresh(document)
+    enqueue_root_job(db, root_job=root_job, document=document, tenant_id=document.tenant_id)
+    return ProcessingJobItem.model_validate(root_job)
