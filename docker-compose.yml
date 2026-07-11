@@ -42,8 +42,8 @@ services:
       args:
         SERVICE_PATH: services/document-service/app
         SERVICE_PORT: 8001
-        REQUIREMENTS_GROUPS: base,queue,storage,parsing
-        INSTALL_OCR_SYSTEM_DEPS: "true"
+        REQUIREMENTS_GROUPS: ${DOCUMENT_SERVICE_REQUIREMENTS_GROUPS:-base,queue,storage,graph}
+        INSTALL_OCR_SYSTEM_DEPS: ${DOCUMENT_SERVICE_INSTALL_OCR_SYSTEM_DEPS:-false}
     env_file: .env
     environment:
       SERVICE_NAME: document-service
@@ -51,9 +51,12 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      - postgres
-      - rustfs
-      - rabbitmq
+      postgres:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+      rabbitmq:
+        condition: service_started
 
   retrieval-service:
     build:
@@ -62,13 +65,15 @@ services:
       args:
         SERVICE_PATH: services/retrieval-service/app
         SERVICE_PORT: 8002
-        REQUIREMENTS_GROUPS: base,graph,ml
+        REQUIREMENTS_GROUPS: ${RETRIEVAL_SERVICE_REQUIREMENTS_GROUPS:-base,graph}
     env_file: .env
     environment:
       SERVICE_NAME: retrieval-service
       SERVICE_PORT: 8002
+      EMBEDDING_PROVIDER: ${DOCKER_EMBEDDING_PROVIDER:-hash}
+      EMBEDDING_MODEL_NAME: ${DOCKER_EMBEDDING_MODEL_NAME:-hash-1024}
       HF_HOME: /opt/hf-cache
-      PRELOAD_BGE_M3: "true"
+      PRELOAD_BGE_M3: ${PRELOAD_BGE_M3:-false}
     ports:
       - "8002:8002"
     volumes:
@@ -131,7 +136,8 @@ services:
     ports:
       - "8005:8005"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   worker-runner:
     build:
@@ -140,18 +146,20 @@ services:
       args:
         SERVICE_PATH: services/worker/app
         SERVICE_PORT: 8005
-        REQUIREMENTS_GROUPS: base,queue,storage,graph,parsing,ml
-        INSTALL_OCR_SYSTEM_DEPS: "true"
+        REQUIREMENTS_GROUPS: ${WORKER_RUNNER_REQUIREMENTS_GROUPS:-base,queue,storage,graph,parsing}
+        INSTALL_OCR_SYSTEM_DEPS: ${WORKER_RUNNER_INSTALL_OCR_SYSTEM_DEPS:-true}
     env_file: .env
     environment:
       SERVICE_NAME: worker-runner
       SERVICE_PORT: 8005
+      EMBEDDING_PROVIDER: ${DOCKER_EMBEDDING_PROVIDER:-hash}
+      EMBEDDING_MODEL_NAME: ${DOCKER_EMBEDDING_MODEL_NAME:-hash-1024}
       HF_HOME: /opt/hf-cache
-      PRELOAD_BGE_M3: "true"
+      PRELOAD_BGE_M3: ${PRELOAD_BGE_M3:-false}
     command:
       - sh
       - -c
-      - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
+      - cd /app/services/worker/app && celery -A celery_app:celery_app worker --loglevel=info --without-mingle --without-gossip -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
     volumes:
       - hf_cache:/opt/hf-cache
     depends_on:
@@ -172,6 +180,14 @@ services:
       POSTGRES_DB: chatbot_graph
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U postgres -d chatbot_graph || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     ports:
       - "5432:5432"
     volumes:

@@ -28,6 +28,9 @@ def get_celery_app() -> Celery:
         result_expires=3600,
         task_acks_late=True,
         worker_prefetch_multiplier=1,
+        worker_enable_remote_control=False,
+        worker_send_task_events=False,
+        task_send_sent_event=False,
     )
     return app
 

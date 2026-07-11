@@ -11,6 +11,10 @@ class ServiceSettings(BaseSettings):
     service_port: int = Field(default=8000, alias="SERVICE_PORT")
     api_prefix: str = "/api/v1"
     app_public_url: str = Field(default="http://localhost:3000", alias="APP_PUBLIC_URL")
+    cors_allow_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000",
+        alias="CORS_ALLOW_ORIGINS",
+    )
 
     document_service_url: str = Field(
         default="http://localhost:8001", alias="DOCUMENT_SERVICE_URL"
@@ -39,6 +43,10 @@ class ServiceSettings(BaseSettings):
     postgres_dsn: str = Field(
         default="postgresql+psycopg://postgres:postgres@localhost:5432/chatbot_graph",
         alias="POSTGRES_DSN",
+    )
+    postgres_connect_retries: int = Field(default=20, alias="POSTGRES_CONNECT_RETRIES")
+    postgres_connect_retry_delay_seconds: int = Field(
+        default=3, alias="POSTGRES_CONNECT_RETRY_DELAY_SECONDS"
     )
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     rabbitmq_url: str = Field(default="amqp://guest:guest@localhost:5672//", alias="RABBITMQ_URL")

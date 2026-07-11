@@ -24,7 +24,8 @@ Monorepo cho mot he thong enterprise chatbot theo huong Graph RAG, gom luong ing
 - Graph: Neo4j
 - Object storage: RustFS
 - LLM gateway: OpenRouter
-- Embedding mac dinh: `BAAI/bge-m3`
+- Docker dev mac dinh: `hash-1024`
+- Full ML tuy chon: `BAAI/bge-m3`
 
 ## Cau truc dependency
 
@@ -38,6 +39,12 @@ Python dependencies da duoc tach theo nhom de tranh moi service phai keo ca OCR 
 - `requirements/ml.txt`: `FlagEmbedding`, `torch`, `sentencepiece`
 
 Root `requirements.txt` van include toan bo nhom de ai can cai full local van dung duoc.
+
+Mac dinh `docker compose` da duoc toi uu theo huong dev-lite:
+
+- `retrieval-service` dung `hash` embedding, khong cai `torch/FlagEmbedding`
+- `worker-runner` van giu parsing + OCR, nhung khong cai `ml.txt` neu khong can
+- `document-service` khong con keo parsing/OCR stack
 
 ## Chay nhanh bang Docker
 
@@ -64,9 +71,40 @@ Tenant isolation hien tai duoc scope bang `tenant_id` o API layer. Khi goi cac e
 
 ### 2. Build va chay toan bo he thong
 
+Mac dinh lenh duoi day chay che do dev-lite, nhe hon ro ret:
+
 ```bash
 docker compose up -d --build
 ```
+
+Che do nay phu hop cho:
+
+- dev va debug flow tong the
+- ingest, OCR, parse, chunk, graph extract/upsert
+- retrieval voi `hash` embedding de giam tai may
+
+### 3. Chay full ML voi `bge-m3`
+
+Khong can sua `.env` qua lai. Du an da co file override [docker-compose.full-ml.yml](D:\chatbot\docker-compose.full-ml.yml).
+
+Chay full stack voi full ML:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full-ml.yml up -d --build
+```
+
+Neu stack da dang chay mode nhe va ban chi muon nang cap 2 service lien quan:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full-ml.yml up -d --build retrieval-service worker-runner
+```
+
+File override nay se tu dong:
+
+- cai them `requirements/ml.txt` cho `retrieval-service`
+- cai them `requirements/ml.txt` cho `worker-runner`
+- bat `EMBEDDING_PROVIDER=bge-m3`
+- bat `PRELOAD_BGE_M3=true`
 
 Service URLs:
 
@@ -81,7 +119,7 @@ Service URLs:
 - Neo4j Browser: `http://localhost:7474`
 - RustFS console: `http://localhost:9001`
 
-### 3. Xem logs
+### 4. Xem logs
 
 ```bash
 docker compose logs -f api-gateway
@@ -89,11 +127,17 @@ docker compose logs -f document-service
 docker compose logs -f worker-runner
 ```
 
-### 4. Rebuild mot service
+### 5. Rebuild mot service
 
 ```bash
 docker compose up -d --build retrieval-service
 docker compose up -d --build worker worker-runner
+```
+
+Neu dang dung full ML override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.full-ml.yml up -d --build retrieval-service worker-runner
 ```
 
 ## Chay local theo tung service
@@ -129,15 +173,21 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --app-dir services/api-gateway/app
 ### Document Service
 
 ```bash
-pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/parsing.txt
+pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/graph.txt
 uvicorn main:app --host 0.0.0.0 --port 8001 --app-dir services/document-service/app
 ```
 
 ### Retrieval Service
 
 ```bash
-pip install -r requirements/base.txt -r requirements/graph.txt -r requirements/ml.txt
+pip install -r requirements/base.txt -r requirements/graph.txt
 uvicorn main:app --host 0.0.0.0 --port 8002 --app-dir services/retrieval-service/app
+```
+
+Neu muon dung `bge-m3` local, cai them:
+
+```bash
+pip install -r requirements/ml.txt
 ```
 
 ### Graph Service
@@ -164,9 +214,15 @@ uvicorn main:app --host 0.0.0.0 --port 8005 --app-dir services/worker/app
 ### Celery worker runner
 
 ```bash
-pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/graph.txt -r requirements/parsing.txt -r requirements/ml.txt
+pip install -r requirements/base.txt -r requirements/queue.txt -r requirements/storage.txt -r requirements/graph.txt -r requirements/parsing.txt
 cd services/worker/app
 celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
+```
+
+Neu muon worker-runner dung `bge-m3` local, cai them:
+
+```bash
+pip install -r requirements/ml.txt
 ```
 
 ## Database migration va schema
@@ -221,7 +277,8 @@ Pipeline hien lam cac viec chinh:
 - sinh canonical document + parse report + provenance
 - chunk theo heading/text span, giu metadata va source offsets
 - reuse chunk theo content hash de ho tro incremental update co ban
-- embed chunk bang `bge-m3` va luu vector vao Postgres/PGVector
+- embed chunk va luu vector vao Postgres/PGVector
+- Docker dev mac dinh dung `hash-1024`; full ML moi dung `bge-m3`
 - extract entity/relation qua OpenRouter
 - upsert document/entity/relation vao Neo4j theo version hien tai
 
@@ -333,10 +390,11 @@ Luu y tenant:
 
 ## Mot so luu y van hanh
 
-- `retrieval-service` va `worker-runner` la cac container nang nhat vi can ML stack va model cache.
-- `document-service` va `worker-runner` can OCR system dependencies.
+- `worker-runner` van la container nang nhat vi can parsing/OCR stack.
+- `retrieval-service` o dev mode da duoc giam nhe bang `hash` embedding.
+- `document-service` khong con keo parsing/OCR stack, nen build nhanh hon dang ke.
 - `worker` chi la control API nen da duoc tach ra de build nhe hon.
-- Lan build dau co the lau vi `torch`, `FlagEmbedding` va preload `bge-m3`.
+- Chi khi bat full ML moi phai keo `torch`, `FlagEmbedding` va preload `bge-m3`.
 - Neu khong co `OPENROUTER_API_KEY`, flow extract/generate se khong hoan chinh.
 - Hien chua co migration framework chinh thuc, nen moi thay doi schema production can duoc kiem soat thu cong.
 
@@ -344,5 +402,6 @@ Luu y tenant:
 
 - `GET /health` tren moi service
 - `GET /health/ocr` tren `document-service`
+  - trong image dev-lite, endpoint nay co the tra `degraded` vi OCR runtime khong duoc cai cung image
 - `GET /health/embedding` tren `retrieval-service`
 - `GET /api/v1/system/overview` tren gateway de xem tinh trang toan he thong

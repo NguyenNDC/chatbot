@@ -1,0 +1,18 @@
+services:
+  retrieval-service:
+    build:
+      args:
+        REQUIREMENTS_GROUPS: base,graph,ml
+    environment:
+      EMBEDDING_PROVIDER: bge-m3
+      EMBEDDING_MODEL_NAME: BAAI/bge-m3
+      PRELOAD_BGE_M3: "true"
+
+  worker-runner:
+    build:
+      args:
+        REQUIREMENTS_GROUPS: base,queue,storage,graph,parsing,ml
+    environment:
+      EMBEDDING_PROVIDER: bge-m3
+      EMBEDDING_MODEL_NAME: BAAI/bge-m3
+      PRELOAD_BGE_M3: "true"
