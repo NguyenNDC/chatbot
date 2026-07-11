@@ -793,7 +793,11 @@ def handle_graph_upsert_stage(
         raise ValueError(f"No chunk extractions found for document {document.id}")
 
     neo4j_client.ensure_schema()
-    clear_document_graph(client=neo4j_client, document_id=document.id)
+    clear_document_graph(
+        client=neo4j_client,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+    )
     for row in extraction_rows:
         payload = ChunkExtractionPayload.model_validate(row.extraction_json)
         upsert_extraction_payload(

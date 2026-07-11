@@ -3,6 +3,15 @@ const apiBaseUrl =
 
 export type QueryMode = "auto" | "lookup" | "summary" | "compare" | "temporal";
 
+export type TenantRecord = {
+  id: string;
+  display_name: string;
+  description?: string | null;
+  status: string;
+  document_count: number;
+  created_at: string;
+};
+
 export type Citation = {
   document_id: string;
   document_version_id?: string | null;
@@ -30,6 +39,26 @@ export type QueryResult = {
   contexts: RetrievalContext[];
   policy_summary: string[];
   clarification_question?: string | null;
+};
+
+export type ParsedPreview = {
+  document_id: string;
+  document_version_id: string;
+  version_label: string;
+  title: string;
+  language: string;
+  ocr_required: boolean;
+  ocr_applied: boolean;
+  parse_quality_score: number;
+  parse_warnings: string[];
+  plain_text: string;
+};
+
+export type DocumentDeleteResult = {
+  document_id: string;
+  tenant_id: string;
+  title: string;
+  deleted: boolean;
 };
 
 export type DocumentRecord = {
@@ -102,11 +131,60 @@ export async function askQuestion({
   );
 }
 
-export async function fetchDocuments(): Promise<DocumentRecord[]> {
-  const data = await parseJson<{ items: DocumentRecord[] }>(
-    await fetch(`${apiBaseUrl}/api/v1/documents`, { cache: "no-store" }),
+export async function fetchTenants(): Promise<TenantRecord[]> {
+  const data = await parseJson<{ items: TenantRecord[] }>(
+    await fetch(`${apiBaseUrl}/api/v1/tenants`, { cache: "no-store" }),
   );
   return data.items;
+}
+
+export async function createTenant(payload: {
+  id: string;
+  displayName: string;
+  description: string;
+}): Promise<TenantRecord> {
+  return parseJson<TenantRecord>(
+    await fetch(`${apiBaseUrl}/api/v1/tenants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: payload.id,
+        display_name: payload.displayName,
+        description: payload.description || null,
+      }),
+    }),
+  );
+}
+
+export async function deleteTenant(tenantId: string): Promise<TenantRecord> {
+  return parseJson<TenantRecord>(
+    await fetch(`${apiBaseUrl}/api/v1/tenants/${encodeURIComponent(tenantId)}`, {
+      method: "DELETE",
+    }),
+  );
+}
+
+export async function fetchDocuments(tenantId: string): Promise<DocumentRecord[]> {
+  const data = await parseJson<{ items: DocumentRecord[] }>(
+    await fetch(`${apiBaseUrl}/api/v1/documents?tenant_id=${encodeURIComponent(tenantId)}`, {
+      cache: "no-store",
+    }),
+  );
+  return data.items;
+}
+
+export async function deleteDocument(
+  documentId: string,
+  tenantId: string,
+): Promise<DocumentDeleteResult> {
+  return parseJson<DocumentDeleteResult>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}?tenant_id=${encodeURIComponent(tenantId)}`,
+      {
+        method: "DELETE",
+      },
+    ),
+  );
 }
 
 export async function uploadDocument({
@@ -134,6 +212,22 @@ export async function uploadDocument({
   );
 }
 
+export function rawDocumentPreviewUrl(documentId: string, tenantId: string): string {
+  return `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/raw?tenant_id=${encodeURIComponent(tenantId)}`;
+}
+
+export async function fetchParsedPreview(
+  documentId: string,
+  tenantId: string,
+): Promise<ParsedPreview> {
+  return parseJson<ParsedPreview>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/parsed?tenant_id=${encodeURIComponent(tenantId)}`,
+      { cache: "no-store" },
+    ),
+  );
+}
+
 export async function fetchSystemOverview(): Promise<ServiceStatusMap> {
   const data = await parseJson<{ services: ServiceStatusMap }>(
     await fetch(`${apiBaseUrl}/api/v1/system/overview`, { cache: "no-store" }),
@@ -141,9 +235,11 @@ export async function fetchSystemOverview(): Promise<ServiceStatusMap> {
   return data.services;
 }
 
-export async function fetchJobs(): Promise<JobRecord[]> {
+export async function fetchJobs(tenantId: string): Promise<JobRecord[]> {
   const data = await parseJson<{ items: JobRecord[] }>(
-    await fetch(`${apiBaseUrl}/api/v1/jobs`, { cache: "no-store" }),
+    await fetch(`${apiBaseUrl}/api/v1/jobs?tenant_id=${encodeURIComponent(tenantId)}`, {
+      cache: "no-store",
+    }),
   );
   return data.items;
 }

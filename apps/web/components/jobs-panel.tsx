@@ -17,14 +17,14 @@ function statusClassName(status: string) {
   return status === "completed" ? "status-ok" : status === "running" ? "status-live" : "status-warn";
 }
 
-export function JobsPanel() {
+export function JobsPanel({ tenantId }: { tenantId: string }) {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [isPending, startTransition] = useTransition();
 
   const reloadJobs = () => {
     startTransition(() => {
       void (async () => {
-        const items = await fetchJobs();
+        const items = await fetchJobs(tenantId);
         setJobs(items);
       })();
     });
@@ -32,7 +32,7 @@ export function JobsPanel() {
 
   useEffect(() => {
     reloadJobs();
-  }, []);
+  }, [tenantId]);
 
   return (
     <section className="panel">
@@ -42,6 +42,7 @@ export function JobsPanel() {
           <p className="muted">
             Theo doi stage cua Celery pipeline de biet document dang dung o parse, embed hay graph.
           </p>
+          <div className="tenant-inline">Tenant scope: {tenantId}</div>
         </div>
         <div className="button-row compact-row">
           <div className="pill">{isPending ? "Dang tai..." : `${jobs.length} jobs`}</div>

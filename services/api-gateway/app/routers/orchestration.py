@@ -1,11 +1,14 @@
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Body, File, Form, UploadFile
+from fastapi import APIRouter, Body, File, Form, Query, UploadFile
+from fastapi.responses import Response
 
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.schemas import (
+    DocumentDeleteResponse,
     DocumentListResponse,
+    DocumentParsedPreviewResponse,
     DocumentReprocessRequest,
     DocumentVersionListResponse,
     GenerateAnswerResponse,
@@ -13,6 +16,9 @@ from enterprise_ai_core.schemas import (
     ProcessingJobListResponse,
     QueryRequest,
     QueryResponse,
+    TenantCreateRequest,
+    TenantItem,
+    TenantListResponse,
     UploadAcceptedResponse,
 )
 
@@ -21,21 +27,71 @@ settings = get_settings()
 
 
 @router.get("/documents", response_model=DocumentListResponse)
-async def list_documents() -> DocumentListResponse:
+async def list_documents(tenant_id: str = Query(...)) -> DocumentListResponse:
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(f"{settings.document_service_url}{settings.api_prefix}/documents")
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/documents",
+            params={"tenant_id": tenant_id},
+        )
     response.raise_for_status()
     return DocumentListResponse.model_validate(response.json())
 
 
+@router.get("/tenants", response_model=TenantListResponse)
+async def list_tenants() -> TenantListResponse:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(f"{settings.document_service_url}{settings.api_prefix}/tenants")
+    response.raise_for_status()
+    return TenantListResponse.model_validate(response.json())
+
+
+@router.post("/tenants", response_model=TenantItem, status_code=201)
+async def create_tenant(payload: TenantCreateRequest) -> TenantItem:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            f"{settings.document_service_url}{settings.api_prefix}/tenants",
+            json=payload.model_dump(mode="json"),
+        )
+    response.raise_for_status()
+    return TenantItem.model_validate(response.json())
+
+
+@router.delete("/tenants/{tenant_id}", response_model=TenantItem)
+async def delete_tenant(tenant_id: str) -> TenantItem:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.delete(
+            f"{settings.document_service_url}{settings.api_prefix}/tenants/{tenant_id}"
+        )
+    response.raise_for_status()
+    return TenantItem.model_validate(response.json())
+
+
 @router.get("/documents/{document_id}/versions", response_model=DocumentVersionListResponse)
-async def list_document_versions(document_id: str) -> DocumentVersionListResponse:
+async def list_document_versions(
+    document_id: str,
+    tenant_id: str = Query(...),
+) -> DocumentVersionListResponse:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.get(
-            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/versions"
+            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/versions",
+            params={"tenant_id": tenant_id},
         )
     response.raise_for_status()
     return DocumentVersionListResponse.model_validate(response.json())
+
+
+@router.delete("/documents/{document_id}", response_model=DocumentDeleteResponse)
+async def delete_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+) -> DocumentDeleteResponse:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.delete(
+            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return DocumentDeleteResponse.model_validate(response.json())
 
 
 @router.post("/documents/upload", response_model=UploadAcceptedResponse)
@@ -65,13 +121,14 @@ async def upload_document(
 @router.post("/documents/{document_id}/versions/upload", response_model=UploadAcceptedResponse)
 async def upload_document_version(
     document_id: str,
+    tenant_id: str = Form(...),
     title: str | None = Form(default=None),
     tags: str = Form(default=""),
     effective_from: str | None = Form(default=None),
     file: UploadFile = File(...),
 ) -> UploadAcceptedResponse:
     payload = await file.read()
-    data = {"tags": tags}
+    data = {"tenant_id": tenant_id, "tags": tags}
     if title is not None:
         data["title"] = title
     if effective_from is not None:
@@ -96,14 +153,46 @@ async def upload_document_version(
 async def reprocess_document(
     document_id: str,
     payload: DocumentReprocessRequest = Body(...),
+    tenant_id: str = Query(...),
 ) -> ProcessingJobItem:
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(
             f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/reprocess",
+            params={"tenant_id": tenant_id},
             json=payload.model_dump(mode="json"),
         )
     response.raise_for_status()
     return ProcessingJobItem.model_validate(response.json())
+
+
+@router.get("/documents/{document_id}/preview/raw")
+async def preview_raw_document(document_id: str, tenant_id: str = Query(...)) -> Response:
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/preview/raw",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    headers = {}
+    content_type = response.headers.get("content-type", "application/octet-stream")
+    content_disposition = response.headers.get("content-disposition")
+    if content_disposition:
+        headers["Content-Disposition"] = content_disposition
+    return Response(content=response.content, media_type=content_type, headers=headers)
+
+
+@router.get("/documents/{document_id}/preview/parsed", response_model=DocumentParsedPreviewResponse)
+async def preview_parsed_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+) -> DocumentParsedPreviewResponse:
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/preview/parsed",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return DocumentParsedPreviewResponse.model_validate(response.json())
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -165,16 +254,22 @@ async def system_overview() -> dict:
 
 
 @router.get("/jobs", response_model=ProcessingJobListResponse)
-async def list_jobs() -> ProcessingJobListResponse:
+async def list_jobs(tenant_id: str = Query(...)) -> ProcessingJobListResponse:
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(f"{settings.worker_service_url}{settings.api_prefix}/jobs")
+        response = await client.get(
+            f"{settings.worker_service_url}{settings.api_prefix}/jobs",
+            params={"tenant_id": tenant_id},
+        )
     response.raise_for_status()
     return ProcessingJobListResponse.model_validate(response.json())
 
 
 @router.get("/jobs/{job_id}", response_model=ProcessingJobItem)
-async def get_job(job_id: str) -> ProcessingJobItem:
+async def get_job(job_id: str, tenant_id: str = Query(...)) -> ProcessingJobItem:
     async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(f"{settings.worker_service_url}{settings.api_prefix}/jobs/{job_id}")
+        response = await client.get(
+            f"{settings.worker_service_url}{settings.api_prefix}/jobs/{job_id}",
+            params={"tenant_id": tenant_id},
+        )
     response.raise_for_status()
     return ProcessingJobItem.model_validate(response.json())

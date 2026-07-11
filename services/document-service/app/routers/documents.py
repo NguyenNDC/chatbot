@@ -1,19 +1,35 @@
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
+from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.db import get_db_session
-from enterprise_ai_core.models import Document, DocumentArtifact, DocumentVersion, ProcessingJob
+from enterprise_ai_core.graph_upsert import clear_document_graph
+from enterprise_ai_core.graphdb import get_neo4j_client
+from enterprise_ai_core.models import (
+    ChunkEmbedding,
+    ChunkExtraction,
+    Document,
+    DocumentArtifact,
+    DocumentChunk,
+    DocumentVersion,
+    ProcessingJob,
+    Tenant,
+)
 from enterprise_ai_core.queue import get_celery_app
 from enterprise_ai_core.schemas import (
+    DocumentDeleteResponse,
     DocumentItem,
     DocumentListResponse,
+    DocumentParsedPreviewResponse,
     DocumentReprocessRequest,
     DocumentStatus,
     DocumentVersionItem,
@@ -28,6 +44,7 @@ router = APIRouter(tags=["documents"])
 settings = get_settings()
 storage_client = RustFSStorageClient()
 celery_app = get_celery_app()
+neo4j_client = get_neo4j_client()
 
 
 def utcnow() -> datetime:
@@ -66,6 +83,18 @@ def latest_job_for_document(db: Session, document_id: str) -> ProcessingJob | No
     return db.scalars(statement).first()
 
 
+def get_document_for_tenant(db: Session, document_id: str, tenant_id: str) -> Document | None:
+    statement = select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    return db.scalars(statement).first()
+
+
+def get_active_tenant(db: Session, tenant_id: str) -> Tenant:
+    tenant = db.get(Tenant, tenant_id)
+    if tenant is None or tenant.status != "active":
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
+
+
 def current_version_for_document(db: Session, document_id: str) -> DocumentVersion | None:
     statement = (
         select(DocumentVersion)
@@ -87,6 +116,23 @@ def latest_version_for_document(db: Session, document_id: str) -> DocumentVersio
     return db.scalars(statement).first()
 
 
+def artifact_for_version(
+    db: Session,
+    *,
+    document_version_id: str,
+    artifact_type: str,
+) -> DocumentArtifact | None:
+    statement = (
+        select(DocumentArtifact)
+        .where(
+            DocumentArtifact.document_version_id == document_version_id,
+            DocumentArtifact.artifact_type == artifact_type,
+        )
+        .order_by(DocumentArtifact.created_at.desc())
+    )
+    return db.scalars(statement).first()
+
+
 def next_version_info(db: Session, document_id: str) -> tuple[int, str, str | None]:
     latest_version = latest_version_for_document(db, document_id)
     next_number = (latest_version.version_number + 1) if latest_version else 1
@@ -104,6 +150,24 @@ def parse_effective_from(raw_value: str | None) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def safe_delete_object(*, bucket_name: str, object_key: str) -> None:
+    try:
+        storage_client.delete_object(bucket_name=bucket_name, object_key=object_key)
+    except ClientError:
+        # Missing or already-deleted objects should not block cleanup.
+        pass
+
+
+def safe_revoke_task(task_id: str | None) -> None:
+    if not task_id:
+        return
+    try:
+        celery_app.control.revoke(task_id, terminate=False)
+    except Exception:
+        # Best-effort revoke only. Cleanup should still continue.
+        pass
 
 
 def enqueue_root_job(
@@ -269,16 +333,27 @@ def create_root_document(
 
 
 @router.get("/documents", response_model=DocumentListResponse)
-async def list_documents(db: Session = Depends(get_db_session)) -> DocumentListResponse:
-    statement = select(Document).order_by(Document.created_at.desc())
+async def list_documents(
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> DocumentListResponse:
+    statement = (
+        select(Document)
+        .where(Document.tenant_id == tenant_id)
+        .order_by(Document.created_at.desc())
+    )
     documents = list(db.scalars(statement).all())
     items = [build_document_item(item, latest_job_for_document(db, item.id)) for item in documents]
     return DocumentListResponse(items=items, total=len(items))
 
 
 @router.get("/documents/{document_id}", response_model=DocumentItem)
-async def get_document(document_id: str, db: Session = Depends(get_db_session)) -> DocumentItem:
-    document = db.get(Document, document_id)
+async def get_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> DocumentItem:
+    document = get_document_for_tenant(db, document_id, tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return build_document_item(document, latest_job_for_document(db, document.id))
@@ -287,9 +362,10 @@ async def get_document(document_id: str, db: Session = Depends(get_db_session)) 
 @router.get("/documents/{document_id}/versions", response_model=DocumentVersionListResponse)
 async def list_document_versions(
     document_id: str,
+    tenant_id: str = Query(...),
     db: Session = Depends(get_db_session),
 ) -> DocumentVersionListResponse:
-    document = db.get(Document, document_id)
+    document = get_document_for_tenant(db, document_id, tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     versions = list(
@@ -315,6 +391,7 @@ async def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db_session),
 ) -> UploadAcceptedResponse:
+    get_active_tenant(db, tenant_id)
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
@@ -426,13 +503,15 @@ async def upload_document(
 )
 async def upload_document_version(
     document_id: str,
+    tenant_id: str = Form(...),
     title: str | None = Form(default=None),
     tags: str = Form(default=""),
     effective_from: str | None = Form(default=None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db_session),
 ) -> UploadAcceptedResponse:
-    document = db.get(Document, document_id)
+    get_active_tenant(db, tenant_id)
+    document = get_document_for_tenant(db, document_id, tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -466,9 +545,11 @@ async def upload_document_version(
 async def reprocess_document(
     document_id: str,
     payload: DocumentReprocessRequest,
+    tenant_id: str = Query(...),
     db: Session = Depends(get_db_session),
 ) -> ProcessingJobItem:
-    document = db.get(Document, document_id)
+    get_active_tenant(db, tenant_id)
+    document = get_document_for_tenant(db, document_id, tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -508,3 +589,142 @@ async def reprocess_document(
     db.refresh(document)
     enqueue_root_job(db, root_job=root_job, document=document, tenant_id=document.tenant_id)
     return ProcessingJobItem.model_validate(root_job)
+
+
+@router.delete("/documents/{document_id}", response_model=DocumentDeleteResponse)
+async def delete_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> DocumentDeleteResponse:
+    document = get_document_for_tenant(db, document_id, tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    versions = list(
+        db.scalars(
+            select(DocumentVersion).where(DocumentVersion.document_id == document.id)
+        ).all()
+    )
+    artifacts = list(
+        db.scalars(
+            select(DocumentArtifact).where(DocumentArtifact.document_id == document.id)
+        ).all()
+    )
+    chunks = list(
+        db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document.id)).all()
+    )
+    jobs = list(
+        db.scalars(
+            select(ProcessingJob).where(ProcessingJob.document_id == document.id)
+        ).all()
+    )
+    chunk_ids = [item.id for item in chunks]
+
+    storage_targets = {
+        (version.bucket_name, version.object_key)
+        for version in versions
+    }
+    storage_targets.update(
+        (artifact.bucket_name, artifact.object_key)
+        for artifact in artifacts
+    )
+
+    try:
+        for job in jobs:
+            safe_revoke_task(job.celery_task_id)
+
+        for bucket_name, object_key in storage_targets:
+            safe_delete_object(bucket_name=bucket_name, object_key=object_key)
+
+        clear_document_graph(
+            client=neo4j_client,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Document cleanup failed: {exc}") from exc
+
+    if chunk_ids:
+        db.execute(delete(ChunkEmbedding).where(ChunkEmbedding.document_chunk_id.in_(chunk_ids)))
+        db.execute(delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_(chunk_ids)))
+        db.execute(delete(DocumentChunk).where(DocumentChunk.id.in_(chunk_ids)))
+
+    db.execute(delete(DocumentArtifact).where(DocumentArtifact.document_id == document.id))
+    db.execute(delete(DocumentVersion).where(DocumentVersion.document_id == document.id))
+    db.execute(delete(ProcessingJob).where(ProcessingJob.document_id == document.id))
+    db.execute(delete(Document).where(Document.id == document.id))
+    db.commit()
+
+    return DocumentDeleteResponse(
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        title=document.title,
+        deleted=True,
+    )
+
+
+@router.get("/documents/{document_id}/preview/raw")
+async def preview_raw_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> Response:
+    document = get_document_for_tenant(db, document_id, tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    version = current_version_for_document(db, document.id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Document version not found")
+
+    payload = storage_client.download_bytes(
+        bucket_name=version.bucket_name,
+        object_key=version.object_key,
+    )
+    return Response(
+        content=payload,
+        media_type=document.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f'inline; filename="{document.file_name}"'},
+    )
+
+
+@router.get("/documents/{document_id}/preview/parsed", response_model=DocumentParsedPreviewResponse)
+async def preview_parsed_document(
+    document_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> DocumentParsedPreviewResponse:
+    document = get_document_for_tenant(db, document_id, tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    version = current_version_for_document(db, document.id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Document version not found")
+
+    artifact = artifact_for_version(
+        db,
+        document_version_id=version.id,
+        artifact_type="parsed_canonical_json",
+    )
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Parsed preview not available yet")
+
+    payload = storage_client.download_bytes(
+        bucket_name=artifact.bucket_name,
+        object_key=artifact.object_key,
+    )
+    parsed = json.loads(payload.decode("utf-8"))
+    return DocumentParsedPreviewResponse(
+        document_id=document.id,
+        document_version_id=version.id,
+        version_label=version.version_label,
+        title=document.title,
+        language=parsed.get("language", "unknown"),
+        ocr_required=bool(parsed.get("ocr_required", False)),
+        ocr_applied=bool(parsed.get("ocr_applied", False)),
+        parse_quality_score=float(parsed.get("parse_quality_score", 0.0) or 0.0),
+        parse_warnings=list(parsed.get("parse_warnings", [])),
+        plain_text=str(parsed.get("plain_text", "")),
+    )

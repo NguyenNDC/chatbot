@@ -74,3 +74,6 @@ class RustFSStorageClient:
     def download_bytes(self, *, bucket_name: str, object_key: str) -> bytes:
         response = self._client.get_object(Bucket=bucket_name, Key=object_key)
         return response["Body"].read()
+
+    def delete_object(self, *, bucket_name: str, object_key: str) -> None:
+        self._client.delete_object(Bucket=bucket_name, Key=object_key)

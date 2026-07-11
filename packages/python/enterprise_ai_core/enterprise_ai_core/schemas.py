@@ -35,6 +35,28 @@ class HealthResponse(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class TenantItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    display_name: str
+    description: str | None = None
+    status: str = "active"
+    document_count: int = 0
+    created_at: datetime
+
+
+class TenantCreateRequest(BaseModel):
+    id: str
+    display_name: str
+    description: str | None = None
+
+
+class TenantListResponse(BaseModel):
+    items: list[TenantItem]
+    total: int
+
+
 class DocumentItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,6 +110,26 @@ class DocumentListResponse(BaseModel):
 class DocumentVersionListResponse(BaseModel):
     items: list[DocumentVersionItem]
     total: int
+
+
+class DocumentParsedPreviewResponse(BaseModel):
+    document_id: str
+    document_version_id: str
+    version_label: str
+    title: str
+    language: str
+    ocr_required: bool = False
+    ocr_applied: bool = False
+    parse_quality_score: float = 0.0
+    parse_warnings: list[str] = Field(default_factory=list)
+    plain_text: str = ""
+
+
+class DocumentDeleteResponse(BaseModel):
+    document_id: str
+    tenant_id: str
+    title: str
+    deleted: bool = True
 
 
 class ProcessingJobItem(BaseModel):

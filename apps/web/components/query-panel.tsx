@@ -19,8 +19,7 @@ function answerTone(answerType: string) {
   return answerType === "grounded" || answerType === "partial" ? "status-ok" : "status-warn";
 }
 
-export function QueryPanel() {
-  const [tenantId, setTenantId] = useState("tenant-demo");
+export function QueryPanel({ tenantId }: { tenantId: string }) {
   const [question, setQuestion] = useState(starterQuestion);
   const [mode, setMode] = useState<QueryMode>("auto");
   const [includeGraph, setIncludeGraph] = useState(true);
@@ -38,17 +37,12 @@ export function QueryPanel() {
           <p className="muted">
             Gui cau hoi qua gateway, xem answer type, citation va context duoc retrieval tra ve.
           </p>
+          <div className="tenant-inline">Tenant scope: {tenantId}</div>
         </div>
         <div className="pill">Gateway query flow</div>
       </div>
 
       <div className="input-grid">
-        <input
-          className="input"
-          value={tenantId}
-          onChange={(event) => setTenantId(event.target.value)}
-          placeholder="Tenant ID"
-        />
         <textarea
           className="textarea"
           value={question}
@@ -134,7 +128,6 @@ export function QueryPanel() {
             className="button ghost"
             type="button"
             onClick={() => {
-              setTenantId("tenant-demo");
               setQuestion(starterQuestion);
               setMode("auto");
               setIncludeGraph(true);

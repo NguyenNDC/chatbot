@@ -39,6 +39,7 @@ body {
 
 a {
   color: inherit;
+  text-decoration: none;
 }
 
 button,
@@ -53,6 +54,59 @@ select {
   margin: 0 auto;
   display: grid;
   gap: 24px;
+}
+
+.app-frame {
+  display: grid;
+  gap: 24px;
+}
+
+.topbar {
+  max-width: 1480px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 22px;
+  border-radius: 22px;
+  background: rgba(255, 253, 248, 0.84);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.brand-title {
+  display: block;
+  margin-top: 4px;
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: 1.4rem;
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.topnav a {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(24, 24, 22, 0.08);
+}
+
+.page-stack {
+  max-width: 1480px;
+  margin: 0 auto;
+  display: grid;
+  gap: 24px;
+}
+
+.page-title {
+  margin: 0;
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: clamp(2rem, 4vw, 3.4rem);
 }
 
 .hero,
@@ -107,6 +161,52 @@ select {
   gap: 14px;
 }
 
+.tenant-card-grid {
+  max-width: 1480px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+.tenant-card {
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+
+.tenant-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workspace-strip {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: end;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(24, 24, 22, 0.08);
+}
+
+.workspace-field {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-note {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
 .hero-card {
   display: grid;
   gap: 10px;
@@ -139,6 +239,12 @@ select {
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.06fr) minmax(0, 0.94fr);
+  gap: 24px;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 24px;
 }
 
@@ -192,6 +298,10 @@ select {
 
 .two-columns {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.three-columns {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .input,
@@ -331,6 +441,21 @@ select {
   align-items: end;
 }
 
+.tenant-inline {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.tenant-badge-box {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.66);
+}
+
 .select-wrap {
   display: grid;
   gap: 8px;
@@ -351,6 +476,93 @@ select {
 .flat-list {
   margin: 0;
   padding-left: 18px;
+}
+
+.preview-text {
+  margin: 0;
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(24, 24, 22, 0.08);
+  font: 0.94rem/1.65 "IBM Plex Mono", Consolas, monospace;
+}
+
+.preview-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(24, 24, 22, 0.28);
+  backdrop-filter: blur(6px);
+}
+
+.preview-drawer {
+  width: min(760px, 100vw);
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 16px;
+  padding: 20px;
+  background: rgba(255, 252, 246, 0.98);
+  border-left: 1px solid rgba(24, 24, 22, 0.08);
+  box-shadow: -24px 0 70px rgba(24, 24, 22, 0.16);
+}
+
+.preview-drawer-header,
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.preview-toolbar {
+  justify-content: flex-start;
+}
+
+.preview-tab {
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text);
+}
+
+.preview-tab.is-active {
+  background: linear-gradient(135deg, var(--accent), #d27a43);
+  color: white;
+  border-color: transparent;
+}
+
+.preview-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.preview-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 72vh;
+  border: 1px solid rgba(24, 24, 22, 0.08);
+  border-radius: 18px;
+  background: white;
+}
+
+.preview-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.placeholder-panel {
+  min-height: 260px;
+  align-content: center;
 }
 
 .status-ok,
@@ -378,12 +590,15 @@ select {
 }
 
 @media (max-width: 1160px) {
+  .workspace-grid,
+  .workspace-strip,
   .hero-cards,
   .pipeline-grid,
   .document-meta-grid,
   .detail-grid,
   .query-controls,
-  .two-columns {
+  .two-columns,
+  .three-columns {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -397,6 +612,7 @@ select {
     padding: 14px;
   }
 
+  .topbar,
   .hero,
   .panel {
     padding: 18px;
@@ -407,21 +623,26 @@ select {
     font-size: 2.4rem;
   }
 
+  .workspace-grid,
   .hero-cards,
+  .workspace-strip,
   .pipeline-grid,
   .document-meta-grid,
   .detail-grid,
   .query-controls,
-  .two-columns {
+  .two-columns,
+  .three-columns {
     grid-template-columns: 1fr;
   }
 
+  .topbar,
   .panel-header,
   .answer-header,
   .document-card-top,
   .job-card-top,
   .service-card-top,
-  .context-head {
+  .context-head,
+  .tenant-card-top {
     flex-direction: column;
   }
 }

@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from enterprise_ai_core.graphdb import get_neo4j_client
 
@@ -7,11 +7,11 @@ neo4j_client = get_neo4j_client()
 
 
 @router.get("/entities/{entity_name}/neighbors")
-async def entity_neighbors(entity_name: str) -> dict:
+async def entity_neighbors(entity_name: str, tenant_id: str = Query(...)) -> dict:
     query = """
     MATCH (e:Entity)
-    WHERE toLower(e.name) = toLower($entity_name)
-    OPTIONAL MATCH (e)-[r:RELATED_TO]->(n:Entity)
+    WHERE e.tenant_id = $tenant_id AND toLower(e.name) = toLower($entity_name)
+    OPTIONAL MATCH (e)-[r:RELATED_TO {tenant_id: $tenant_id}]->(n:Entity {tenant_id: $tenant_id})
     RETURN e.name AS entity_name,
            collect({
                name: n.name,
@@ -21,7 +21,7 @@ async def entity_neighbors(entity_name: str) -> dict:
     LIMIT 1
     """
     with neo4j_client.driver.session() as session:
-        record = session.run(query, entity_name=entity_name).single()
+        record = session.run(query, entity_name=entity_name, tenant_id=tenant_id).single()
     if not record:
         return {"entity": entity_name, "neighbors": []}
     neighbors = [item for item in record["neighbors"] if item.get("name")]
@@ -29,9 +29,9 @@ async def entity_neighbors(entity_name: str) -> dict:
 
 
 @router.get("/documents/{document_id}/entities")
-async def document_entities(document_id: str) -> dict:
+async def document_entities(document_id: str, tenant_id: str = Query(...)) -> dict:
     query = """
-    MATCH (e:Entity)-[m:MENTIONED_IN]->(d:Document {id: $document_id})
+    MATCH (e:Entity {tenant_id: $tenant_id})-[m:MENTIONED_IN]->(d:Document {id: $document_id, tenant_id: $tenant_id})
     RETURN d.id AS document_id,
            collect({
                name: e.name,
@@ -40,7 +40,7 @@ async def document_entities(document_id: str) -> dict:
            }) AS entities
     """
     with neo4j_client.driver.session() as session:
-        record = session.run(query, document_id=document_id).single()
+        record = session.run(query, document_id=document_id, tenant_id=tenant_id).single()
     if not record:
         return {"document_id": document_id, "entities": []}
     return {"document_id": record["document_id"], "entities": record["entities"]}

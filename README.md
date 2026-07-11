@@ -60,6 +60,8 @@ Bien quan trong nhat can set:
 - `OPENROUTER_MODEL_FALLBACK`
 - `OPENROUTER_MODEL_EXTRACTION`
 
+Tenant isolation hien tai duoc scope bang `tenant_id` o API layer. Khi goi cac endpoint documents/jobs/query tu client, can truyen dung tenant dang lam viec.
+
 ### 2. Build va chay toan bo he thong
 
 ```bash
@@ -271,15 +273,21 @@ Muc tieu la tranh hallucination khi context yeu hoac cau hoi vi pham policy.
 - entrypoint duy nhat cho frontend
 - proxy/compose request toi `document-service`, `retrieval-service`, `llm-orchestrator`, `worker`
 - expose cac endpoint chinh:
-  - `GET /api/v1/documents`
-  - `GET /api/v1/documents/{document_id}/versions`
+- `GET /api/v1/documents`
+- `GET /api/v1/documents/{document_id}/versions`
   - `POST /api/v1/documents/upload`
   - `POST /api/v1/documents/{document_id}/versions/upload`
   - `POST /api/v1/documents/{document_id}/reprocess`
   - `POST /api/v1/query`
-  - `GET /api/v1/jobs`
-  - `GET /api/v1/jobs/{job_id}`
-  - `GET /api/v1/system/overview`
+- `GET /api/v1/jobs`
+- `GET /api/v1/jobs/{job_id}`
+- `GET /api/v1/system/overview`
+
+Luu y tenant:
+
+- `GET /api/v1/documents` va `GET /api/v1/jobs` can query param `tenant_id`
+- upload document/version can `tenant_id` trong form-data
+- query da scope theo `tenant_id` trong JSON body
 
 ### `services/document-service`
 

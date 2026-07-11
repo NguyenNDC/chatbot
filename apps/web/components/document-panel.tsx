@@ -2,7 +2,15 @@
 
 import { useEffect, useState, useTransition } from "react";
 
-import { fetchDocuments, type DocumentRecord, uploadDocument } from "../lib/api";
+import {
+  deleteDocument,
+  fetchDocuments,
+  fetchParsedPreview,
+  rawDocumentPreviewUrl,
+  type DocumentRecord,
+  type ParsedPreview,
+  uploadDocument,
+} from "../lib/api";
 
 function formatBytes(value?: number | null) {
   if (!value) {
@@ -21,142 +29,324 @@ function statusClassName(status?: string | null) {
   return status === "processed" || status === "completed" ? "status-ok" : "status-warn";
 }
 
-export function DocumentPanel() {
+const stageLabels: Record<string, string> = {
+  "document.parse": "Parse canonical",
+  "document.chunk": "Chunk + provenance",
+  "document.embed": "Embedding",
+  "graph.extract": "Entity extraction",
+  "graph.upsert": "Neo4j upsert",
+};
+
+function progressLabel(document: DocumentRecord) {
+  if (document.current_job_type && document.current_job_status) {
+    return `${stageLabels[document.current_job_type] ?? document.current_job_type} | ${document.current_job_status}`;
+  }
+  return document.status;
+}
+
+type PreviewMode = "raw" | "parsed";
+
+export function DocumentPanel({ tenantId }: { tenantId: string }) {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
-  const [tenantId, setTenantId] = useState("tenant-demo");
   const [title, setTitle] = useState("Quy trinh cap phat PPE");
   const [tags, setTags] = useState("an-toan, ppe");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [preview, setPreview] = useState<ParsedPreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewDocument, setPreviewDocument] = useState<DocumentRecord | null>(null);
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("raw");
   const [isPending, startTransition] = useTransition();
+  const [isPreviewPending, startPreviewTransition] = useTransition();
 
   const reloadDocuments = () => {
     startTransition(() => {
       void (async () => {
-        const items = await fetchDocuments();
+        const items = await fetchDocuments(tenantId);
         setDocuments(items);
+      })();
+    });
+  };
+
+  const openPreview = (document: DocumentRecord, mode: PreviewMode) => {
+    setPreviewDocument(document);
+    setPreviewMode(mode);
+    setPreviewError(null);
+    if (mode === "raw") {
+      setPreview(null);
+      return;
+    }
+
+    startPreviewTransition(() => {
+      void (async () => {
+        try {
+          const next = await fetchParsedPreview(document.id, tenantId);
+          setPreview(next);
+        } catch (error) {
+          setPreview(null);
+          setPreviewError(error instanceof Error ? error.message : "Khong tai duoc parsed preview");
+        }
       })();
     });
   };
 
   useEffect(() => {
     reloadDocuments();
-  }, []);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewDocument(null);
+  }, [tenantId]);
 
   return (
-    <section className="panel">
-      <div className="panel-header">
-        <div>
-          <h2>Kho Tai Lieu</h2>
-          <p className="muted">
-            Upload tai lieu nguon vao ingest pipeline va theo doi document/version dang duoc xu ly.
-          </p>
+    <>
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Quan Ly Tai Lieu</h2>
+            <p className="muted">
+              Upload tai lieu cua tenant, theo doi tien trinh RAG, va mo file goc hoac ban parsed/OCR.
+              Khi xoa document, he thong se don ca raw file, OCR artifacts, chunks, embeddings, jobs, va graph data lien quan.
+            </p>
+          </div>
+          <div className="button-row compact-row">
+            <div className="pill">{documents.length} documents</div>
+            <button className="button ghost" type="button" onClick={reloadDocuments}>
+              Lam moi
+            </button>
+          </div>
         </div>
-        <div className="button-row compact-row">
-          <div className="pill">{documents.length} documents</div>
-          <button className="button ghost" type="button" onClick={reloadDocuments}>
-            Lam moi
+
+        <div className="input-grid two-columns">
+          <input
+            className="input"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="Ten tai lieu"
+          />
+          <input
+            className="input"
+            value={tags}
+            onChange={(event) => setTags(event.target.value)}
+            placeholder="Tags, phan cach boi dau phay"
+          />
+          <div className="tenant-badge-box">
+            <span className="meta-label">tenant scope</span>
+            <strong>{tenantId}</strong>
+          </div>
+          <input
+            className="input"
+            type="file"
+            onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+          />
+        </div>
+
+        <div className="button-row">
+          <button
+            className="button"
+            disabled={isPending}
+            type="button"
+            onClick={() => {
+              startTransition(() => {
+                void (async () => {
+                  if (!selectedFile) {
+                    setMessage("Can chon file truoc khi upload.");
+                    return;
+                  }
+                  const response = await uploadDocument({
+                    tenantId,
+                    title,
+                    tags,
+                    file: selectedFile,
+                  });
+                  const items = await fetchDocuments(tenantId);
+                  setDocuments(items);
+                  setMessage(
+                    `Da tao document ${response.document.title} va enqueue job ${response.root_job.job_type} (${response.root_job.status}).`,
+                  );
+                })();
+              });
+            }}
+          >
+            {isPending ? "Dang upload..." : "Upload vao ingest"}
           </button>
         </div>
-      </div>
 
-      <div className="input-grid two-columns">
-        <input
-          className="input"
-          value={tenantId}
-          onChange={(event) => setTenantId(event.target.value)}
-          placeholder="Tenant ID"
-        />
-        <input
-          className="input"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="Ten tai lieu"
-        />
-        <input
-          className="input"
-          value={tags}
-          onChange={(event) => setTags(event.target.value)}
-          placeholder="Tags, phan cach boi dau phay"
-        />
-        <input
-          className="input"
-          type="file"
-          onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-        />
-      </div>
+        {message ? <p className="muted">{message}</p> : null}
 
-      <div className="button-row">
-        <button
-          className="button"
-          disabled={isPending}
-          type="button"
-          onClick={() => {
-            startTransition(() => {
-              void (async () => {
-                if (!selectedFile) {
-                  setMessage("Can chon file truoc khi upload.");
-                  return;
-                }
-                const response = await uploadDocument({
-                  tenantId,
-                  title,
-                  tags,
-                  file: selectedFile,
-                });
-                const items = await fetchDocuments();
-                setDocuments(items);
-                setMessage(
-                  `Da tao document ${response.document.title} va enqueue job ${response.root_job.job_type} (${response.root_job.status}).`,
-                );
-              })();
-            });
-          }}
-        >
-          {isPending ? "Dang upload..." : "Upload vao ingest"}
-        </button>
-      </div>
+        <div className="list-box">
+          {documents.length === 0 ? (
+            <div className="muted">Chua co tai lieu nao trong he thong.</div>
+          ) : (
+            documents.map((document) => (
+              <article className="document-card" key={document.id}>
+                <div className="document-card-top">
+                  <div>
+                    <strong>{document.title}</strong>
+                    <div className="muted">
+                      {document.file_name} | {document.content_type} | {formatBytes(document.size_bytes)}
+                    </div>
+                  </div>
+                  <div className={statusClassName(document.status)}>{document.status}</div>
+                </div>
 
-      {message ? <p className="muted">{message}</p> : null}
-
-      <div className="list-box">
-        {documents.length === 0 ? (
-          <div className="muted">Chua co tai lieu nao trong he thong.</div>
-        ) : (
-          documents.map((document) => (
-            <article className="document-card" key={document.id}>
-              <div className="document-card-top">
-                <div>
-                  <strong>{document.title}</strong>
-                  <div className="muted">
-                    {document.file_name} | {document.content_type} | {formatBytes(document.size_bytes)}
+                <div className="document-meta-grid">
+                  <div>
+                    <span className="meta-label">tenant</span>
+                    <div>{document.tenant_id}</div>
+                  </div>
+                  <div>
+                    <span className="meta-label">version</span>
+                    <div>{document.version}</div>
+                  </div>
+                  <div>
+                    <span className="meta-label">rag progress</span>
+                    <div>{progressLabel(document)}</div>
+                  </div>
+                  <div>
+                    <span className="meta-label">job status</span>
+                    <div>{document.current_job_status ?? "n/a"}</div>
                   </div>
                 </div>
-                <div className={statusClassName(document.status)}>{document.status}</div>
-              </div>
 
-              <div className="document-meta-grid">
-                <div>
-                  <span className="meta-label">tenant</span>
-                  <div>{document.tenant_id}</div>
+                <div className="button-row">
+                  <button
+                    className="button ghost"
+                    type="button"
+                    onClick={() => openPreview(document, "raw")}
+                  >
+                    Xem tai lieu goc
+                  </button>
+                  <button
+                    className="button ghost"
+                    type="button"
+                    onClick={() => openPreview(document, "parsed")}
+                  >
+                    Xem sau OCR
+                  </button>
+                  <button
+                    className="button ghost"
+                    type="button"
+                    onClick={() => {
+                      const confirmed = window.confirm(
+                        `Xoa document ${document.title}? Hanh dong nay se xoa raw file, OCR artifacts, chunks, embeddings, jobs, va graph data lien quan.`,
+                      );
+                      if (!confirmed) {
+                        return;
+                      }
+                      startTransition(() => {
+                        void (async () => {
+                          const result = await deleteDocument(document.id, tenantId);
+                          const items = await fetchDocuments(tenantId);
+                          setDocuments(items);
+                          setMessage(`Da xoa document ${result.title} va toan bo du lieu lien quan.`);
+                          if (previewDocument?.id === document.id) {
+                            setPreviewDocument(null);
+                            setPreview(null);
+                            setPreviewError(null);
+                          }
+                        })();
+                      });
+                    }}
+                  >
+                    Xoa document
+                  </button>
                 </div>
-                <div>
-                  <span className="meta-label">version</span>
-                  <div>{document.version}</div>
-                </div>
-                <div>
-                  <span className="meta-label">job</span>
-                  <div>{document.current_job_type ?? "none"}</div>
-                </div>
-                <div>
-                  <span className="meta-label">job status</span>
-                  <div>{document.current_job_status ?? "n/a"}</div>
-                </div>
+              </article>
+            ))
+          )}
+        </div>
+      </section>
+
+      {previewDocument ? (
+        <div className="preview-drawer-backdrop" onClick={() => setPreviewDocument(null)}>
+          <aside
+            className="preview-drawer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="preview-drawer-header">
+              <div>
+                <div className="eyebrow">Document Preview</div>
+                <strong>{previewDocument.title}</strong>
+                <div className="muted">{previewDocument.file_name}</div>
               </div>
-            </article>
-          ))
-        )}
-      </div>
-    </section>
+              <button className="button ghost" type="button" onClick={() => setPreviewDocument(null)}>
+                Dong
+              </button>
+            </div>
+
+            <div className="preview-toolbar">
+              <button
+                className={`preview-tab ${previewMode === "raw" ? "is-active" : ""}`}
+                type="button"
+                onClick={() => openPreview(previewDocument, "raw")}
+              >
+                Ban goc
+              </button>
+              <button
+                className={`preview-tab ${previewMode === "parsed" ? "is-active" : ""}`}
+                type="button"
+                onClick={() => openPreview(previewDocument, "parsed")}
+              >
+                Parsed / OCR
+              </button>
+              <a
+                className="button ghost"
+                href={rawDocumentPreviewUrl(previewDocument.id, tenantId)}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Mo tab moi
+              </a>
+            </div>
+
+            <div className="preview-body">
+              {previewMode === "raw" ? (
+                <iframe
+                  className="preview-frame"
+                  src={rawDocumentPreviewUrl(previewDocument.id, tenantId)}
+                  title={`raw-preview-${previewDocument.id}`}
+                />
+              ) : isPreviewPending ? (
+                <div className="muted">Dang tai parsed/OCR preview...</div>
+              ) : previewError ? (
+                <div className="status-warn">{previewError}</div>
+              ) : preview ? (
+                <div className="preview-stack">
+                  <div className="detail-grid">
+                    <div className="detail-card">
+                      <span className="meta-label">language</span>
+                      <strong>{preview.language}</strong>
+                    </div>
+                    <div className="detail-card">
+                      <span className="meta-label">ocr applied</span>
+                      <strong>{preview.ocr_applied ? "yes" : "no"}</strong>
+                    </div>
+                    <div className="detail-card">
+                      <span className="meta-label">parse quality</span>
+                      <strong>{preview.parse_quality_score.toFixed(2)}</strong>
+                    </div>
+                  </div>
+
+                  {preview.parse_warnings.length > 0 ? (
+                    <div className="callout">
+                      <strong>Parse warnings</strong>
+                      <ul className="flat-list">
+                        {preview.parse_warnings.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+
+                  <pre className="preview-text">{preview.plain_text || "Khong co plain text."}</pre>
+                </div>
+              ) : (
+                <div className="muted">Chua co parsed preview.</div>
+              )}
+            </div>
+          </aside>
+        </div>
+      ) : null}
+    </>
   );
 }

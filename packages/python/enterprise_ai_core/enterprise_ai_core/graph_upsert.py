@@ -5,21 +5,50 @@ from .graphdb import Neo4jClient
 from .schemas import ChunkExtractionPayload
 
 
-def clear_document_graph(*, client: Neo4jClient, document_id: str) -> None:
+def clear_document_graph(*, client: Neo4jClient, document_id: str, tenant_id: str) -> None:
     with client.driver.session() as session:
         session.run(
             """
-            MATCH ()-[r:RELATED_TO {document_id: $document_id}]->()
+            MATCH (:Entity {tenant_id: $tenant_id})-[r:RELATED_TO {document_id: $document_id}]->(:Entity {tenant_id: $tenant_id})
             DELETE r
             """,
             document_id=document_id,
+            tenant_id=tenant_id,
         ).consume()
         session.run(
             """
-            MATCH (:Entity)-[m:MENTIONED_IN]->(:Document {id: $document_id})
-            DELETE m
+            MATCH (d:Document {id: $document_id, tenant_id: $tenant_id})
+            DETACH DELETE d
             """,
             document_id=document_id,
+            tenant_id=tenant_id,
+        ).consume()
+        session.run(
+            """
+            MATCH (e:Entity {tenant_id: $tenant_id})
+            WHERE NOT (e)-[:MENTIONED_IN]->(:Document {tenant_id: $tenant_id})
+              AND NOT (e)-[:RELATED_TO]-(:Entity {tenant_id: $tenant_id})
+            DETACH DELETE e
+            """,
+            tenant_id=tenant_id,
+        ).consume()
+
+
+def clear_tenant_graph(*, client: Neo4jClient, tenant_id: str) -> None:
+    with client.driver.session() as session:
+        session.run(
+            """
+            MATCH (d:Document {tenant_id: $tenant_id})
+            DETACH DELETE d
+            """,
+            tenant_id=tenant_id,
+        ).consume()
+        session.run(
+            """
+            MATCH (e:Entity {tenant_id: $tenant_id})
+            DETACH DELETE e
+            """,
+            tenant_id=tenant_id,
         ).consume()
 
 
