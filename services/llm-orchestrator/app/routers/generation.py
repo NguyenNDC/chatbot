@@ -1,3 +1,5 @@
+import json
+import re
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -116,7 +118,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
                 temperature=0.1,
                 max_tokens=settings.llm_answer_max_tokens,
             )
-            answer_payload = result["content"] if isinstance(result["content"], dict) else None
+            answer_payload = normalize_model_answer_payload(result.get("content"), result.get("raw_text"))
             model_name = candidate_model
             if answer_payload:
                 break
@@ -134,10 +136,12 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             policy_summary=fallback["policy_summary"],
         )
 
-    citation_ids = [item for item in answer_payload.get("citations", []) if item in citation_map]
+    citation_ids = [
+        item for item in normalize_string_list(answer_payload.get("citations")) if item in citation_map
+    ]
     citations = [citation_map[item] for item in citation_ids]
     disposition = parse_disposition(answer_payload.get("answer_type"))
-    answer_text = str(answer_payload.get("answer", "")).strip()
+    answer_text = normalize_answer_text(answer_payload)
 
     if disposition in {AnswerDisposition.GROUNDED, AnswerDisposition.PARTIAL} and not citations:
         citations = [selected_contexts[0].source]
@@ -145,7 +149,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
         answer_text = fallback_text_for(disposition)
 
     policy_summary = dedupe_strings(
-        [str(item).strip() for item in answer_payload.get("policy_summary", []) if str(item).strip()]
+        normalize_string_list(answer_payload.get("policy_summary"))
     )
     if not policy_summary:
         policy_summary = default_policy_summary(disposition)
@@ -204,7 +208,7 @@ def needs_clarification(payload: GenerateAnswerRequest, contexts: list[Retrieval
 
 def build_clarification_question(question: str) -> str:
     return (
-        f"Cau hoi '{question}' can chi ro hai tai lieu, hai chinh sach hoac hai phien ban can so sanh."
+        f"Câu hỏi '{question}' cần chỉ rõ hai tài liệu, hai chính sách hoặc hai phiên bản cần so sánh."
     )
 
 
@@ -230,8 +234,8 @@ def build_local_fallback(
     citations = [context.source for context in top_contexts]
     snippets = [trim_snippet(context.content) for context in top_contexts]
     answer = (
-        f"Chua sinh duoc cau tra loi tu model cho cau hoi '{question}'. "
-        "Duoi day la noi dung lien quan nhat tim duoc tu tai lieu: "
+        f"Mình chưa sinh được câu trả lời hoàn chỉnh từ LLM cho câu hỏi: '{question}'. "
+        "Dưới đây là phần nội dung liên quan nhất tìm được trong tài liệu: "
         + " ".join(snippets)
     )
     return {
@@ -249,7 +253,115 @@ def fallback_text_for(disposition: AnswerDisposition) -> str:
         return REFUSAL_TEMPLATE
     if disposition == AnswerDisposition.CLARIFICATION:
         return CLARIFICATION_TEMPLATE
-    return "Khong tao duoc cau tra loi co cau truc tu model."
+    return "Mình chưa tạo được câu trả lời đủ tin cậy từ các tài liệu đã truy xuất."
+
+
+def normalize_model_answer_payload(content: object, raw_text: object = None) -> dict | None:
+    if isinstance(content, dict):
+        if content.get("answer") or content.get("content"):
+            return content
+        raw_content = normalize_optional_text(content.get("raw_content"))
+        if raw_content:
+            parsed = parse_json_object_from_text(raw_content)
+            if parsed:
+                return parsed
+            return plain_text_answer_payload(raw_content)
+    if isinstance(content, str) and content.strip():
+        parsed = parse_json_object_from_text(content)
+        if parsed:
+            return parsed
+        return plain_text_answer_payload(content)
+    if isinstance(raw_text, str) and raw_text.strip():
+        parsed = parse_json_object_from_text(raw_text)
+        if parsed:
+            return parsed
+        return plain_text_answer_payload(raw_text)
+    return None
+
+
+def normalize_answer_text(answer_payload: dict) -> str:
+    for key in ("answer", "content", "raw_content"):
+        value = normalize_optional_text(answer_payload.get(key))
+        if value:
+            nested_message = extract_message_content_json(value)
+            return nested_message or strip_markdown_json_fence(value)
+    return ""
+
+
+def plain_text_answer_payload(raw_text: str) -> dict:
+    answer_text = extract_message_content_json(raw_text) or strip_markdown_json_fence(raw_text)
+    return {
+        "answer": answer_text,
+        "answer_type": "grounded",
+        "citations": [],
+        "policy_summary": ["grounded-answer-only", "plain-text-model-response"],
+        "clarification_question": None,
+        "refusal_reason": None,
+    }
+
+
+def normalize_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list):
+        return []
+
+    items: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            normalized = item.strip()
+        elif isinstance(item, dict):
+            normalized = str(
+                item.get("chunk_id")
+                or item.get("id")
+                or item.get("policy")
+                or item.get("name")
+                or ""
+            ).strip()
+        else:
+            normalized = str(item).strip()
+        if normalized:
+            items.append(normalized)
+    return items
+
+
+def parse_json_object_from_text(text: str) -> dict | None:
+    candidates = [strip_markdown_json_fence(text)]
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    candidates.extend(fenced)
+    object_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if object_match:
+        candidates.append(object_match.group(0))
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def strip_markdown_json_fence(text: str) -> str:
+    normalized = text.strip()
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```(?:json)?\s*", "", normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r"\s*```$", "", normalized)
+    return normalized.strip()
+
+
+def extract_message_content_json(text: str) -> str | None:
+    parsed = parse_json_object_from_text(text)
+    if not parsed:
+        return None
+    for key in ("answer", "content", "message"):
+        value = normalize_optional_text(parsed.get(key))
+        if value:
+            return value
+    return None
 
 
 def default_policy_summary(disposition: AnswerDisposition) -> list[str]:

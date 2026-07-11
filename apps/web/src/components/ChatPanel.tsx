@@ -78,6 +78,33 @@ function answerLabel(answerType?: string | null) {
   return mapping[answerType ?? ""] ?? "Tra loi";
 }
 
+function readableMessageContent(content: string) {
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const candidates = [trimmed];
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    candidates.push(trimmed.slice(objectStart, objectEnd + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as { answer?: unknown; content?: unknown; message?: unknown };
+      const readable = parsed.answer ?? parsed.content ?? parsed.message;
+      if (typeof readable === "string" && readable.trim()) {
+        return readable.trim();
+      }
+    } catch {
+      // Plain text is the common path. Keep it as-is.
+    }
+  }
+  return content;
+}
+
 function knowledgeStatus(documents: DocumentRecord[]) {
   const ready = documents.filter((document) => document.status === "processed").length;
   const active = documents.filter(
@@ -381,7 +408,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                               : "border-slate-200 bg-white text-ink-950",
                         )}
                       >
-                        <div className="whitespace-pre-wrap">{message.pending ? "Dang soan cau tra loi..." : message.content}</div>
+                        <div className="whitespace-pre-wrap">{message.pending ? "Dang soan cau tra loi..." : readableMessageContent(message.content)}</div>
                         {message.answer_type ? <span className="badge-neutral w-fit">{answerLabel(message.answer_type)}</span> : null}
                         {message.policy_summary.length > 0 ? (
                           <div className="flex flex-wrap gap-1.5">

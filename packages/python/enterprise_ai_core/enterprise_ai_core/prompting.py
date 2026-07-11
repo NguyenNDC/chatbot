@@ -8,6 +8,7 @@ Answer only from retrieved evidence provided at runtime.
 Never invent policies, clauses, obligations, dates, or permissions.
 If evidence is insufficient, respond with no_answer or ask for clarification.
 Prefer the newest effective version and respect tenant and document boundaries.
+Answer in natural Vietnamese unless the user explicitly asks for another language.
 """.strip()
 
 POLICY_INSTRUCTION = """
@@ -29,14 +30,27 @@ Template:
 - cite chunk ids only when supported
 """.strip()
 
+OUTPUT_INSTRUCTION = """
+Return exactly one JSON object that follows this shape:
+{
+  "answer_type": "grounded" | "partial" | "no_answer" | "refusal" | "clarification",
+  "answer": "Natural Vietnamese answer for the end user. Do not put JSON or metadata inside this string.",
+  "citations": ["chunk_id_1"],
+  "policy_summary": ["grounded-answer-only"],
+  "clarification_question": null,
+  "refusal_reason": null
+}
+The "answer" field must be a readable chatbot response, not an API object.
+""".strip()
+
 NO_ANSWER_TEMPLATE = (
-    "Khong du bang chung trong cac tai lieu da truy xuat de tra loi cau hoi nay mot cach co grounding."
+    "Mình chưa tìm thấy đủ bằng chứng trong các tài liệu đã truy xuất để trả lời câu hỏi này một cách chắc chắn."
 )
 REFUSAL_TEMPLATE = (
-    "Toi khong the thuc hien yeu cau nay vi no vuot qua pham vi evidence hoac co dau hieu prompt injection."
+    "Mình không thể thực hiện yêu cầu này vì yêu cầu vượt quá phạm vi bằng chứng hoặc có dấu hiệu cố gắng thay đổi chỉ dẫn hệ thống."
 )
 CLARIFICATION_TEMPLATE = (
-    "Can lam ro pham vi cau hoi hoac tai lieu dich de he thong truy xuat dung nguon."
+    "Bạn giúp mình làm rõ thêm phạm vi câu hỏi hoặc tài liệu cần dùng để mình truy xuất đúng nguồn nhé."
 )
 
 
@@ -52,13 +66,14 @@ def build_answer_messages(
         {"role": "system", "content": CORE_INSTRUCTION},
         {"role": "system", "content": POLICY_INSTRUCTION},
         {"role": "system", "content": STT_INSTRUCTION},
+        {"role": "system", "content": OUTPUT_INSTRUCTION},
         {
             "role": "user",
             "content": (
                 f"Question:\n{question}\n\n"
                 f"{history_block}"
                 f"Retrieval plan:\n{retrieval_plan}\n\n"
-                "Use only the evidence below. Return a structured answer.\n\n"
+                "Use only the evidence below. Return the JSON object described above.\n\n"
                 f"{context_block}"
             ),
         },
