@@ -98,6 +98,47 @@ def empty_extraction_payload(
     )
 
 
+def _parse_json_candidate(candidate: str) -> dict | None:
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_payload_dict(raw_payload: object) -> dict:
+    if isinstance(raw_payload, dict) and "raw_content" not in raw_payload:
+        return raw_payload
+
+    raw_content = ""
+    if isinstance(raw_payload, dict):
+        raw_content = str(raw_payload.get("raw_content", ""))
+    elif isinstance(raw_payload, str):
+        raw_content = raw_payload
+
+    raw_content = raw_content.strip()
+    if not raw_content:
+        raise ValueError("LLM extraction payload is empty")
+
+    direct = _parse_json_candidate(raw_content)
+    if direct is not None:
+        return direct
+
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_content, re.DOTALL)
+    if fenced_match:
+        fenced_payload = _parse_json_candidate(fenced_match.group(1))
+        if fenced_payload is not None:
+            return fenced_payload
+
+    object_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+    if object_match:
+        object_payload = _parse_json_candidate(object_match.group(0))
+        if object_payload is not None:
+            return object_payload
+
+    raise ValueError("LLM extraction payload is not valid JSON")
+
+
 def run_chunk_extraction(
     *,
     client: OpenRouterClient,
@@ -139,11 +180,11 @@ def run_chunk_extraction(
         max_tokens=1200,
     )
     try:
-        payload = result["content"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
+        payload = _extract_payload_dict(result["content"])
         if not isinstance(payload, dict):
             raise ValueError("LLM extraction payload is not a JSON object")
+        if any(key not in payload for key in ("summary", "entities", "relations")):
+            raise ValueError("LLM extraction payload is missing required fields")
 
         normalized_entities = []
         for item in payload.get("entities", []):
@@ -183,7 +224,7 @@ def run_chunk_extraction(
                 }
             )
 
-        return ChunkExtractionPayload.model_validate(
+        extraction_payload = ChunkExtractionPayload.model_validate(
             {
                 "tenant_id": tenant_id,
                 "document_id": document_id,
@@ -193,6 +234,20 @@ def run_chunk_extraction(
                 "relations": normalized_relations,
             }
         )
+        if (
+            not extraction_payload.summary.strip()
+            and not extraction_payload.entities
+            and not extraction_payload.relations
+        ):
+            logger.warning(
+                "chunk_extraction_empty_result",
+                tenant_id=tenant_id,
+                document_id=document_id,
+                chunk_id=chunk_id,
+                section_name=section_name,
+                raw_response_preview=str(result.get("raw_text", ""))[:600],
+            )
+        return extraction_payload
     except Exception as exc:
         logger.warning(
             "chunk_extraction_payload_fallback",
@@ -200,6 +255,7 @@ def run_chunk_extraction(
             document_id=document_id,
             chunk_id=chunk_id,
             error_message=str(exc),
+            raw_response_preview=str(result.get("raw_text", ""))[:600],
         )
         return empty_extraction_payload(
             tenant_id=tenant_id,

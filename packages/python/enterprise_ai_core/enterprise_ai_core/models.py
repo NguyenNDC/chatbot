@@ -26,6 +26,8 @@ class Tenant(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(back_populates="tenant")
+
 
 class Document(Base):
     __tablename__ = "documents"
@@ -179,3 +181,41 @@ class ChunkExtraction(Base):
     provider: Mapped[str] = mapped_column(String(64), index=True)
     extraction_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Cuoc hoi moi")
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_message_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="chat_sessions")
+    messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id"), index=True)
+    tenant_id: Mapped[str] = mapped_column(String(120), index=True)
+    role: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    answer_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    citations: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    contexts: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    policy_summary: Mapped[list[str]] = mapped_column(JSON, default=list)
+    clarification_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refusal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[ChatSession] = relationship(back_populates="messages")

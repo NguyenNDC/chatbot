@@ -49,6 +49,7 @@ class OpenRouterClient:
                     response.raise_for_status()
                     payload = response.json()
                 choice = payload["choices"][0]["message"]["content"]
+                raw_text = choice if isinstance(choice, str) else json.dumps(choice, ensure_ascii=False)
                 if isinstance(choice, str):
                     try:
                         parsed = json.loads(choice)
@@ -56,7 +57,7 @@ class OpenRouterClient:
                         parsed = {"raw_content": choice}
                 else:
                     parsed = choice
-                return {"response": payload, "content": parsed}
+                return {"response": payload, "content": parsed, "raw_text": raw_text}
             except Exception as exc:
                 last_error = exc
                 if attempt >= self.settings.openrouter_max_retries:

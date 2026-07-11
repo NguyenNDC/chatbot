@@ -6,6 +6,15 @@ from fastapi.responses import Response
 
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.schemas import (
+    ChatMessageCreateRequest,
+    ChatMessageItem,
+    ChatMessageListResponse,
+    ChatSendMessageRequest,
+    ChatSendMessageResponse,
+    ChatSessionCreateRequest,
+    ChatSessionItem,
+    ChatSessionListResponse,
+    ConversationTurn,
     DocumentDeleteResponse,
     DocumentListResponse,
     DocumentParsedPreviewResponse,
@@ -40,6 +49,8 @@ REFERENTIAL_MARKERS = (
     "what about",
 )
 
+CHAT_HISTORY_LIMIT = 12
+
 
 def build_retrieval_question(payload: QueryRequest) -> str:
     question = " ".join(payload.question.split())
@@ -60,6 +71,86 @@ def build_retrieval_question(payload: QueryRequest) -> str:
         return question
 
     return " ".join([*recent_user_turns, question])
+
+
+def build_conversation_history(messages: list[ChatMessageItem]) -> list[ConversationTurn]:
+    turns = [
+        ConversationTurn(role=message.role, content=message.content)
+        for message in messages
+        if message.role in {"user", "assistant"} and message.content.strip()
+    ]
+    return turns[-CHAT_HISTORY_LIMIT:]
+
+
+async def run_query_pipeline(payload: QueryRequest) -> QueryResponse:
+    trace_id = str(uuid4())
+    retrieval_question = build_retrieval_question(payload)
+    retrieval_payload = payload.model_copy(update={"question": retrieval_question})
+    try:
+        async with httpx.AsyncClient(timeout=settings.gateway_query_retrieval_timeout_seconds) as client:
+            retrieval_response = await client.post(
+                f"{settings.retrieval_service_url}{settings.api_prefix}/retrieve",
+                json=retrieval_payload.model_dump(mode="json"),
+            )
+        retrieval_response.raise_for_status()
+        retrieval_data = retrieval_response.json()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Retrieval service timed out") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Retrieval service request failed: {exc}") from exc
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.gateway_query_llm_timeout_seconds) as client:
+            llm_response = await client.post(
+                f"{settings.llm_service_url}{settings.api_prefix}/generate",
+                json={
+                    "tenant_id": payload.tenant_id,
+                    "question": payload.question,
+                    "contexts": retrieval_data["contexts"],
+                    "retrieval_plan": retrieval_data.get("plan", {}),
+                    "conversation_history": [turn.model_dump(mode="json") for turn in payload.conversation_history],
+                },
+            )
+        llm_response.raise_for_status()
+        answer = GenerateAnswerResponse.model_validate(llm_response.json())
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Chatbot answer generation timed out") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"LLM orchestration request failed: {exc}") from exc
+
+    return QueryResponse(
+        trace_id=trace_id,
+        question=payload.question,
+        answer=answer.answer,
+        answer_type=answer.answer_type,
+        citations=answer.citations,
+        contexts=retrieval_data["contexts"],
+        policy_summary=answer.policy_summary,
+        clarification_question=answer.clarification_question,
+    )
+
+
+async def get_chat_session_document_service(session_id: str, tenant_id: str) -> ChatSessionItem:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions/{session_id}",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return ChatSessionItem.model_validate(response.json())
+
+
+async def append_chat_message_document_service(
+    session_id: str,
+    payload: ChatMessageCreateRequest,
+) -> ChatMessageItem:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.post(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions/{session_id}/messages",
+            json=payload.model_dump(mode="json"),
+        )
+    response.raise_for_status()
+    return ChatMessageItem.model_validate(response.json())
 
 
 @router.get("/documents", response_model=DocumentListResponse)
@@ -233,47 +324,7 @@ async def preview_parsed_document(
 
 @router.post("/query", response_model=QueryResponse)
 async def query(payload: QueryRequest) -> QueryResponse:
-    trace_id = str(uuid4())
-    retrieval_question = build_retrieval_question(payload)
-    retrieval_payload = payload.model_copy(update={"question": retrieval_question})
-    try:
-        async with httpx.AsyncClient(timeout=settings.gateway_query_retrieval_timeout_seconds) as client:
-            retrieval_response = await client.post(
-                f"{settings.retrieval_service_url}{settings.api_prefix}/retrieve",
-                json=retrieval_payload.model_dump(mode="json"),
-            )
-        retrieval_response.raise_for_status()
-        retrieval_data = retrieval_response.json()
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Retrieval service timed out") from exc
-
-    try:
-        async with httpx.AsyncClient(timeout=settings.gateway_query_llm_timeout_seconds) as client:
-            llm_response = await client.post(
-                f"{settings.llm_service_url}{settings.api_prefix}/generate",
-                json={
-                    "tenant_id": payload.tenant_id,
-                    "question": payload.question,
-                    "contexts": retrieval_data["contexts"],
-                    "retrieval_plan": retrieval_data.get("plan", {}),
-                    "conversation_history": [turn.model_dump(mode="json") for turn in payload.conversation_history],
-                },
-            )
-        llm_response.raise_for_status()
-        answer = GenerateAnswerResponse.model_validate(llm_response.json())
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Chatbot answer generation timed out") from exc
-
-    return QueryResponse(
-        trace_id=trace_id,
-        question=payload.question,
-        answer=answer.answer,
-        answer_type=answer.answer_type,
-        citations=answer.citations,
-        contexts=retrieval_data["contexts"],
-        policy_summary=answer.policy_summary,
-        clarification_question=answer.clarification_question,
-    )
+    return await run_query_pipeline(payload)
 
 
 @router.get("/system/overview")
@@ -319,3 +370,135 @@ async def get_job(job_id: str, tenant_id: str = Query(...)) -> ProcessingJobItem
         )
     response.raise_for_status()
     return ProcessingJobItem.model_validate(response.json())
+
+
+@router.get("/chat/sessions", response_model=ChatSessionListResponse)
+async def list_chat_sessions(tenant_id: str = Query(...)) -> ChatSessionListResponse:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return ChatSessionListResponse.model_validate(response.json())
+
+
+@router.post("/chat/sessions", response_model=ChatSessionItem, status_code=201)
+async def create_chat_session(payload: ChatSessionCreateRequest) -> ChatSessionItem:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.post(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions",
+            json=payload.model_dump(mode="json"),
+        )
+    response.raise_for_status()
+    return ChatSessionItem.model_validate(response.json())
+
+
+@router.get("/chat/sessions/{session_id}", response_model=ChatSessionItem)
+async def get_chat_session(session_id: str, tenant_id: str = Query(...)) -> ChatSessionItem:
+    return await get_chat_session_document_service(session_id, tenant_id)
+
+
+@router.delete("/chat/sessions/{session_id}", response_model=ChatSessionItem)
+async def delete_chat_session(session_id: str, tenant_id: str = Query(...)) -> ChatSessionItem:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.delete(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions/{session_id}",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return ChatSessionItem.model_validate(response.json())
+
+
+@router.get("/chat/sessions/{session_id}/messages", response_model=ChatMessageListResponse)
+async def list_chat_messages(
+    session_id: str,
+    tenant_id: str = Query(...),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> ChatMessageListResponse:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/chat/sessions/{session_id}/messages",
+            params={"tenant_id": tenant_id, "limit": limit},
+        )
+    response.raise_for_status()
+    return ChatMessageListResponse.model_validate(response.json())
+
+
+@router.post("/chat/sessions/{session_id}/messages", response_model=ChatSendMessageResponse)
+async def send_chat_message(
+    session_id: str,
+    payload: ChatSendMessageRequest,
+) -> ChatSendMessageResponse:
+    session = await get_chat_session_document_service(session_id, payload.tenant_id)
+
+    history_response = await list_chat_messages(
+        session_id=session_id,
+        tenant_id=payload.tenant_id,
+        limit=CHAT_HISTORY_LIMIT * 4,
+    )
+    conversation_history = build_conversation_history(history_response.items)
+
+    user_message = await append_chat_message_document_service(
+        session_id,
+        ChatMessageCreateRequest(
+            tenant_id=payload.tenant_id,
+            role="user",
+            content=payload.message,
+        ),
+    )
+
+    try:
+        query_response = await run_query_pipeline(
+            QueryRequest(
+                tenant_id=payload.tenant_id,
+                question=payload.message,
+                top_k=payload.top_k,
+                include_graph=payload.include_graph,
+                include_summaries=payload.include_summaries,
+                query_mode=payload.query_mode,
+                conversation_history=conversation_history,
+            )
+        )
+        assistant_message = await append_chat_message_document_service(
+            session_id,
+            ChatMessageCreateRequest(
+                tenant_id=payload.tenant_id,
+                role="assistant",
+                content=query_response.answer,
+                answer_type=query_response.answer_type.value,
+                citations=query_response.citations,
+                contexts=query_response.contexts,
+                policy_summary=query_response.policy_summary,
+                clarification_question=query_response.clarification_question,
+                trace_id=query_response.trace_id,
+            ),
+        )
+    except HTTPException as exc:
+        assistant_message = await append_chat_message_document_service(
+            session_id,
+            ChatMessageCreateRequest(
+                tenant_id=payload.tenant_id,
+                role="system",
+                content=f"Chatbot tam thoi chua tra loi duoc. Chi tiet: {exc.detail}",
+                answer_type="failed",
+                policy_summary=["delivery-failure"],
+            ),
+        )
+    except Exception as exc:
+        assistant_message = await append_chat_message_document_service(
+            session_id,
+            ChatMessageCreateRequest(
+                tenant_id=payload.tenant_id,
+                role="system",
+                content=f"Chatbot tam thoi chua tra loi duoc. Chi tiet: {exc}",
+                answer_type="failed",
+                policy_summary=["delivery-failure"],
+            ),
+        )
+    updated_session = await get_chat_session_document_service(session.id, payload.tenant_id)
+    return ChatSendMessageResponse(
+        session=updated_session,
+        user_message=user_message,
+        assistant_message=assistant_message,
+    )

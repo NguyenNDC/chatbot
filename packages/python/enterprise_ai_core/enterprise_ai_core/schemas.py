@@ -320,6 +320,81 @@ class ConversationTurn(BaseModel):
     content: str
 
 
+class ChatSessionItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    tenant_id: str
+    title: str
+    status: str = "active"
+    message_count: int = 0
+    last_message_at: datetime | None = None
+    last_message_preview: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChatSessionCreateRequest(BaseModel):
+    tenant_id: str
+    title: str | None = None
+
+
+class ChatSessionListResponse(BaseModel):
+    items: list[ChatSessionItem]
+    total: int
+
+
+class ChatMessageItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    tenant_id: str
+    role: Literal["user", "assistant", "system"]
+    content: str
+    answer_type: str | None = None
+    citations: list["Citation"] = Field(default_factory=list)
+    contexts: list["RetrievalChunk"] = Field(default_factory=list)
+    policy_summary: list[str] = Field(default_factory=list)
+    clarification_question: str | None = None
+    refusal_reason: str | None = None
+    trace_id: str | None = None
+    created_at: datetime
+
+
+class ChatMessageCreateRequest(BaseModel):
+    tenant_id: str
+    role: Literal["user", "assistant", "system"]
+    content: str
+    answer_type: str | None = None
+    citations: list["Citation"] = Field(default_factory=list)
+    contexts: list["RetrievalChunk"] = Field(default_factory=list)
+    policy_summary: list[str] = Field(default_factory=list)
+    clarification_question: str | None = None
+    refusal_reason: str | None = None
+    trace_id: str | None = None
+
+
+class ChatMessageListResponse(BaseModel):
+    items: list[ChatMessageItem]
+    total: int
+
+
+class ChatSendMessageRequest(BaseModel):
+    tenant_id: str
+    message: str
+    query_mode: Literal["auto", "lookup", "summary", "compare", "temporal"] = "auto"
+    top_k: int = 6
+    include_graph: bool = True
+    include_summaries: bool = True
+
+
+class ChatSendMessageResponse(BaseModel):
+    session: ChatSessionItem
+    user_message: ChatMessageItem
+    assistant_message: ChatMessageItem
+
+
 class QueryRequest(BaseModel):
     tenant_id: str
     question: str

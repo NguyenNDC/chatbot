@@ -162,11 +162,17 @@ def build_job_progress_snapshot(job: Any) -> JobProgressSnapshot:
     if current_stage == "graph.extract":
         current = _as_int(payload.get("extraction_completed_unique_chunks"))
         total = _as_int(payload.get("extraction_total_unique_chunks"))
+        resumed = _as_int(payload.get("extraction_resumed_unique_chunk_count"))
         if current is None or total is None:
             current = _as_int(payload.get("extraction_completed_chunks"))
             total = _as_int(payload.get("extraction_total_chunks"))
+            resumed = _as_int(payload.get("extraction_resumed_chunk_count"))
         if current is not None and total:
             detail = f"{current}/{total} chunks extracted"
+            if resumed:
+                detail = f"{detail} | {resumed} resumed"
+        elif current is not None:
+            detail = f"{current} chunks extracted"
     elif current_stage == "document.embed":
         current = _as_int(payload.get("embedding_count"))
         total = _count_from_payload_list(payload.get("chunk_ids_requiring_embedding"))
@@ -193,7 +199,13 @@ def build_job_progress_snapshot(job: Any) -> JobProgressSnapshot:
                 detail = None
     elif current_stage == "graph.upsert":
         current = _as_int(payload.get("upserted_extraction_count"))
-        if current is not None:
+        total = _as_int(payload.get("upsert_total_extraction_count"))
+        resumed = _as_int(payload.get("upsert_resumed_extraction_count")) or 0
+        if current is not None and total:
+            detail = f"{current}/{total} chunk extractions synced to Neo4j"
+            if resumed > 0:
+                detail = f"{detail} | {resumed} resumed"
+        elif current is not None:
             detail = f"{current} chunk extractions synced to Neo4j"
 
     ratio = None

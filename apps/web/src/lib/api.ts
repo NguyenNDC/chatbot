@@ -1,8 +1,6 @@
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
 export type QueryMode = "auto" | "lookup" | "summary" | "compare" | "temporal";
-export type ConversationRole = "user" | "assistant";
 
 export type TenantRecord = {
   id: string;
@@ -31,22 +29,6 @@ export type RetrievalContext = {
   source: Citation;
 };
 
-export type QueryResult = {
-  trace_id: string;
-  question: string;
-  answer: string;
-  answer_type: string;
-  citations: Citation[];
-  contexts: RetrievalContext[];
-  policy_summary: string[];
-  clarification_question?: string | null;
-};
-
-export type ConversationTurn = {
-  role: ConversationRole;
-  content: string;
-};
-
 export type ParsedPreview = {
   document_id: string;
   document_version_id: string;
@@ -58,13 +40,6 @@ export type ParsedPreview = {
   parse_quality_score: number;
   parse_warnings: string[];
   plain_text: string;
-};
-
-export type DocumentDeleteResult = {
-  document_id: string;
-  tenant_id: string;
-  title: string;
-  deleted: boolean;
 };
 
 export type DocumentRecord = {
@@ -91,6 +66,7 @@ export type DocumentRecord = {
   processing_progress_label: string;
   processing_progress_detail?: string | null;
   processing_mode?: string | null;
+  created_at: string;
 };
 
 export type JobRecord = {
@@ -116,6 +92,40 @@ export type JobRecord = {
   progress_detail?: string | null;
 };
 
+export type ChatSessionRecord = {
+  id: string;
+  tenant_id: string;
+  title: string;
+  status: string;
+  message_count: number;
+  last_message_at?: string | null;
+  last_message_preview?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ChatMessageRecord = {
+  id: string;
+  session_id: string;
+  tenant_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  answer_type?: string | null;
+  citations: Citation[];
+  contexts: RetrievalContext[];
+  policy_summary: string[];
+  clarification_question?: string | null;
+  refusal_reason?: string | null;
+  trace_id?: string | null;
+  created_at: string;
+};
+
+export type ChatSendResponse = {
+  session: ChatSessionRecord;
+  user_message: ChatMessageRecord;
+  assistant_message: ChatMessageRecord;
+};
+
 export type ServiceStatusMap = Record<string, { status: string; detail?: string }>;
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -125,47 +135,15 @@ async function parseJson<T>(response: Response): Promise<T> {
       const payload = (await response.json()) as { detail?: string | { message?: string } };
       if (typeof payload.detail === "string") {
         message = payload.detail;
-      } else if (payload.detail && typeof payload.detail.message === "string") {
+      } else if (payload.detail?.message) {
         message = payload.detail.message;
       }
-    } catch {}
+    } catch {
+      // Keep the HTTP fallback message.
+    }
     throw new Error(message);
   }
   return (await response.json()) as T;
-}
-
-export async function askQuestion({
-  tenantId,
-  question,
-  queryMode,
-  topK,
-  includeGraph,
-  includeSummaries,
-  conversationHistory,
-}: {
-  tenantId: string;
-  question: string;
-  queryMode: QueryMode;
-  topK: number;
-  includeGraph: boolean;
-  includeSummaries: boolean;
-  conversationHistory?: ConversationTurn[];
-}): Promise<QueryResult> {
-  return parseJson<QueryResult>(
-    await fetch(`${apiBaseUrl}/api/v1/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tenant_id: tenantId,
-        question,
-        query_mode: queryMode,
-        top_k: topK,
-        include_graph: includeGraph,
-        include_summaries: includeSummaries,
-        conversation_history: conversationHistory ?? [],
-      }),
-    }),
-  );
 }
 
 export async function fetchTenants(): Promise<TenantRecord[]> {
@@ -210,36 +188,17 @@ export async function fetchDocuments(tenantId: string): Promise<DocumentRecord[]
   return data.items;
 }
 
-export async function deleteDocument(
-  documentId: string,
-  tenantId: string,
-): Promise<DocumentDeleteResult> {
-  return parseJson<DocumentDeleteResult>(
-    await fetch(
-      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}?tenant_id=${encodeURIComponent(tenantId)}`,
-      {
-        method: "DELETE",
-      },
-    ),
-  );
-}
-
-export async function uploadDocument({
-  tenantId,
-  title,
-  tags,
-  file,
-}: {
+export async function uploadDocument(payload: {
   tenantId: string;
   title: string;
   tags: string;
   file: File;
 }): Promise<{ document: DocumentRecord; root_job: JobRecord; object_key: string }> {
   const formData = new FormData();
-  formData.append("tenant_id", tenantId);
-  formData.append("title", title);
-  formData.append("tags", tags);
-  formData.append("file", file);
+  formData.append("tenant_id", payload.tenantId);
+  formData.append("title", payload.title);
+  formData.append("tags", payload.tags);
+  formData.append("file", payload.file);
 
   return parseJson<{ document: DocumentRecord; root_job: JobRecord; object_key: string }>(
     await fetch(`${apiBaseUrl}/api/v1/documents/upload`, {
@@ -249,27 +208,39 @@ export async function uploadDocument({
   );
 }
 
+export async function deleteDocument(documentId: string, tenantId: string): Promise<{ deleted: boolean; title: string }> {
+  return parseJson<{ deleted: boolean; title: string }>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}?tenant_id=${encodeURIComponent(tenantId)}`,
+      { method: "DELETE" },
+    ),
+  );
+}
+
+export async function reprocessDocument(documentId: string, tenantId: string, mode: "full" | "incremental"): Promise<JobRecord> {
+  return parseJson<JobRecord>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/reprocess?tenant_id=${encodeURIComponent(tenantId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, reason: "ui_reprocess" }),
+      },
+    ),
+  );
+}
+
 export function rawDocumentPreviewUrl(documentId: string, tenantId: string): string {
   return `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/raw?tenant_id=${encodeURIComponent(tenantId)}`;
 }
 
-export async function fetchParsedPreview(
-  documentId: string,
-  tenantId: string,
-): Promise<ParsedPreview> {
+export async function fetchParsedPreview(documentId: string, tenantId: string): Promise<ParsedPreview> {
   return parseJson<ParsedPreview>(
     await fetch(
       `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/parsed?tenant_id=${encodeURIComponent(tenantId)}`,
       { cache: "no-store" },
     ),
   );
-}
-
-export async function fetchSystemOverview(): Promise<ServiceStatusMap> {
-  const data = await parseJson<{ services: ServiceStatusMap }>(
-    await fetch(`${apiBaseUrl}/api/v1/system/overview`, { cache: "no-store" }),
-  );
-  return data.services;
 }
 
 export async function fetchJobs(tenantId: string): Promise<JobRecord[]> {
@@ -279,4 +250,76 @@ export async function fetchJobs(tenantId: string): Promise<JobRecord[]> {
     }),
   );
   return data.items;
+}
+
+export async function fetchSystemOverview(): Promise<ServiceStatusMap> {
+  const data = await parseJson<{ services: ServiceStatusMap }>(
+    await fetch(`${apiBaseUrl}/api/v1/system/overview`, { cache: "no-store" }),
+  );
+  return data.services;
+}
+
+export async function fetchChatSessions(tenantId: string): Promise<ChatSessionRecord[]> {
+  const data = await parseJson<{ items: ChatSessionRecord[] }>(
+    await fetch(`${apiBaseUrl}/api/v1/chat/sessions?tenant_id=${encodeURIComponent(tenantId)}`, {
+      cache: "no-store",
+    }),
+  );
+  return data.items;
+}
+
+export async function createChatSession(payload: {
+  tenantId: string;
+  title?: string;
+}): Promise<ChatSessionRecord> {
+  return parseJson<ChatSessionRecord>(
+    await fetch(`${apiBaseUrl}/api/v1/chat/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: payload.tenantId,
+        title: payload.title ?? null,
+      }),
+    }),
+  );
+}
+
+export async function deleteChatSession(sessionId: string, tenantId: string): Promise<ChatSessionRecord> {
+  return parseJson<ChatSessionRecord>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/chat/sessions/${encodeURIComponent(sessionId)}?tenant_id=${encodeURIComponent(tenantId)}`,
+      { method: "DELETE" },
+    ),
+  );
+}
+
+export async function fetchChatMessages(sessionId: string, tenantId: string): Promise<ChatMessageRecord[]> {
+  const data = await parseJson<{ items: ChatMessageRecord[] }>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/chat/sessions/${encodeURIComponent(sessionId)}/messages?tenant_id=${encodeURIComponent(tenantId)}`,
+      { cache: "no-store" },
+    ),
+  );
+  return data.items;
+}
+
+export async function sendChatMessage(payload: {
+  sessionId: string;
+  tenantId: string;
+  message: string;
+}): Promise<ChatSendResponse> {
+  return parseJson<ChatSendResponse>(
+    await fetch(`${apiBaseUrl}/api/v1/chat/sessions/${encodeURIComponent(payload.sessionId)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: payload.tenantId,
+        message: payload.message,
+        query_mode: "auto",
+        top_k: 6,
+        include_graph: true,
+        include_summaries: true,
+      }),
+    }),
+  );
 }

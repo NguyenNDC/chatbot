@@ -7,6 +7,8 @@ from enterprise_ai_core.db import get_db_session
 from enterprise_ai_core.graph_upsert import clear_tenant_graph
 from enterprise_ai_core.graphdb import get_neo4j_client
 from enterprise_ai_core.models import (
+    ChatMessage,
+    ChatSession,
     ChunkEmbedding,
     ChunkExtraction,
     Document,
@@ -136,6 +138,13 @@ async def delete_tenant(tenant_id: str, db: Session = Depends(get_db_session)) -
         db.execute(delete(DocumentVersion).where(DocumentVersion.document_id.in_(document_ids)))
         db.execute(delete(ProcessingJob).where(ProcessingJob.document_id.in_(document_ids)))
         db.execute(delete(Document).where(Document.id.in_(document_ids)))
+
+    session_ids = list(
+        db.scalars(select(ChatSession.id).where(ChatSession.tenant_id == tenant_id)).all()
+    )
+    if session_ids:
+        db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
+        db.execute(delete(ChatSession).where(ChatSession.id.in_(session_ids)))
 
     deleted_snapshot = build_tenant_item(tenant, len(documents))
     db.delete(tenant)

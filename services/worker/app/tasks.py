@@ -9,7 +9,11 @@ from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.db import SessionLocal
 from enterprise_ai_core.embedding import get_embedding_provider
 from enterprise_ai_core.extraction import clone_extraction_for_chunk, run_parallel_chunk_extractions
-from enterprise_ai_core.graph_upsert import clear_document_graph, upsert_extraction_payload
+from enterprise_ai_core.graph_upsert import (
+    clear_document_graph,
+    list_document_graph_chunk_ids,
+    upsert_extraction_payload,
+)
 from enterprise_ai_core.graphdb import get_neo4j_client
 from enterprise_ai_core.logging import get_logger
 from enterprise_ai_core.models import (
@@ -853,31 +857,78 @@ def handle_graph_extract_stage(
         )
         return
 
-    extracted_payloads: list[ChunkExtractionPayload] = []
-    session.execute(
-        delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_([chunk.id for chunk in chunk_rows]))
-    )
-    session.flush()
-
     chunk_groups: dict[str, list[DocumentChunk]] = {}
     for chunk_row in chunk_rows:
         chunk_groups.setdefault(chunk_row.content_hash, []).append(chunk_row)
 
-    unique_chunk_requests: list[dict[str, str]] = []
     chunk_group_by_request_id: dict[str, list[DocumentChunk]] = {}
+    representative_rows: list[DocumentChunk] = []
     for group in chunk_groups.values():
         representative = group[0]
-        unique_chunk_requests.append(
-            {
-                "chunk_id": representative.id,
-                "content": representative.content,
-                "section_name": representative.section_name,
-            }
-        )
+        representative_rows.append(representative)
         chunk_group_by_request_id[representative.id] = group
+
+    existing_extraction_rows = list(
+        session.scalars(
+            select(ChunkExtraction).where(
+                ChunkExtraction.document_chunk_id.in_([chunk.id for chunk in chunk_rows])
+            )
+        ).all()
+    )
+    existing_chunk_ids = {row.document_chunk_id for row in existing_extraction_rows}
+
+    resumed_unique_chunk_count = 0
+    resumed_chunk_count = 0
+    partial_chunk_ids_to_delete: list[str] = []
+    pending_representatives: list[DocumentChunk] = []
+
+    for representative in representative_rows:
+        grouped_rows = chunk_group_by_request_id[representative.id]
+        existing_group_chunk_ids = [chunk.id for chunk in grouped_rows if chunk.id in existing_chunk_ids]
+        if len(existing_group_chunk_ids) == len(grouped_rows):
+            resumed_unique_chunk_count += 1
+            resumed_chunk_count += len(grouped_rows)
+            continue
+        if existing_group_chunk_ids:
+            partial_chunk_ids_to_delete.extend(existing_group_chunk_ids)
+        pending_representatives.append(representative)
+
+    if partial_chunk_ids_to_delete:
+        session.execute(
+            delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_(partial_chunk_ids_to_delete))
+        )
+        session.flush()
+        logger.warning(
+            "graph_extract_partial_resume_reset",
+            stage_name="graph.extract",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reset_chunk_count=len(partial_chunk_ids_to_delete),
+        )
+
+    unique_chunk_requests = [
+        {
+            "chunk_id": representative.id,
+            "content": representative.content,
+            "section_name": representative.section_name,
+        }
+        for representative in pending_representatives
+    ]
     progress_interval = max(1, settings.graph_extract_progress_log_interval)
     commit_interval = max(1, settings.graph_extract_commit_interval)
-    completed_chunk_count = 0
+    completed_chunk_count = resumed_chunk_count
+    total_unique_chunk_count = len(chunk_group_by_request_id)
+    total_chunk_count = len(chunk_rows)
+    job.payload = {
+        **job.payload,
+        "extraction_completed_unique_chunks": resumed_unique_chunk_count,
+        "extraction_total_unique_chunks": total_unique_chunk_count,
+        "extraction_completed_chunks": completed_chunk_count,
+        "extraction_total_chunks": total_chunk_count,
+    }
+    session.add(job)
     logger.info(
         "graph_extract_initialized",
         stage_name="graph.extract",
@@ -885,16 +936,21 @@ def handle_graph_extract_stage(
         document_id=document.id,
         tenant_id=document.tenant_id,
         version_label=version.version_label,
-        total_chunks=len(chunk_rows),
-        unique_chunk_count=len(unique_chunk_requests),
-        reused_chunk_count=len(chunk_rows) - len(unique_chunk_requests),
+        total_chunks=total_chunk_count,
+        unique_chunk_count=total_unique_chunk_count,
+        pending_unique_chunk_count=len(unique_chunk_requests),
+        resumed_unique_chunk_count=resumed_unique_chunk_count,
+        resumed_chunk_count=resumed_chunk_count,
+        reused_chunk_count=total_chunk_count - total_unique_chunk_count,
         max_concurrency=settings.graph_extract_max_concurrency,
         commit_interval=commit_interval,
         progress_log_interval=progress_interval,
     )
+    session.commit()
 
     def log_extract_progress(completed: int, total: int) -> None:
-        if completed == total or completed % progress_interval == 0:
+        absolute_completed = resumed_unique_chunk_count + completed
+        if absolute_completed == total_unique_chunk_count or absolute_completed % progress_interval == 0:
             logger.info(
                 "graph_extract_progress",
                 stage_name="graph.extract",
@@ -902,9 +958,9 @@ def handle_graph_extract_stage(
                 document_id=document.id,
                 tenant_id=document.tenant_id,
                 version_label=version.version_label,
-                completed_unique_chunks=completed,
-                total_unique_chunks=total,
-                total_chunks=len(chunk_rows),
+                completed_unique_chunks=absolute_completed,
+                total_unique_chunks=total_unique_chunk_count,
+                total_chunks=total_chunk_count,
             )
 
     def persist_extraction_progress(
@@ -914,6 +970,7 @@ def handle_graph_extract_stage(
     ) -> None:
         nonlocal completed_chunk_count
 
+        absolute_completed_unique_chunks = resumed_unique_chunk_count + completed_unique_chunks
         grouped_rows = chunk_group_by_request_id.get(payload.document_chunk_id)
         if grouped_rows is None:
             raise KeyError(
@@ -925,7 +982,6 @@ def handle_graph_extract_stage(
                 if chunk_row.id == payload.document_chunk_id
                 else clone_extraction_for_chunk(payload, chunk_id=chunk_row.id)
             )
-            extracted_payloads.append(extraction)
             session.add(
                 ChunkExtraction(
                     document_chunk_id=chunk_row.id,
@@ -937,15 +993,15 @@ def handle_graph_extract_stage(
         completed_chunk_count += len(grouped_rows)
         job.payload = {
             **job.payload,
-            "extraction_completed_unique_chunks": completed_unique_chunks,
-            "extraction_total_unique_chunks": total_unique_chunks,
+            "extraction_completed_unique_chunks": absolute_completed_unique_chunks,
+            "extraction_total_unique_chunks": total_unique_chunk_count,
             "extraction_completed_chunks": completed_chunk_count,
-            "extraction_total_chunks": len(chunk_rows),
+            "extraction_total_chunks": total_chunk_count,
         }
         session.add(job)
         if (
-            completed_unique_chunks == total_unique_chunks
-            or completed_unique_chunks % commit_interval == 0
+            absolute_completed_unique_chunks == total_unique_chunk_count
+            or absolute_completed_unique_chunks % commit_interval == 0
         ):
             session.commit()
             logger.info(
@@ -955,21 +1011,51 @@ def handle_graph_extract_stage(
                 document_id=document.id,
                 tenant_id=document.tenant_id,
                 version_label=version.version_label,
-                completed_unique_chunks=completed_unique_chunks,
-                total_unique_chunks=total_unique_chunks,
+                completed_unique_chunks=absolute_completed_unique_chunks,
+                total_unique_chunks=total_unique_chunk_count,
                 completed_chunks=completed_chunk_count,
-                total_chunks=len(chunk_rows),
+                total_chunks=total_chunk_count,
             )
 
-    unique_extractions = run_parallel_chunk_extractions(
-        client=openrouter_client,
-        model_name=settings.openrouter_model_extraction,
-        tenant_id=document.tenant_id,
-        document_id=document.id,
-        chunk_requests=unique_chunk_requests,
-        progress_callback=log_extract_progress,
-        result_callback=persist_extraction_progress,
-    )
+    unique_extractions: list[ChunkExtractionPayload] = []
+    if unique_chunk_requests:
+        unique_extractions = run_parallel_chunk_extractions(
+            client=openrouter_client,
+            model_name=settings.openrouter_model_extraction,
+            tenant_id=document.tenant_id,
+            document_id=document.id,
+            chunk_requests=unique_chunk_requests,
+            progress_callback=log_extract_progress,
+            result_callback=persist_extraction_progress,
+        )
+    else:
+        logger.info(
+            "graph_extract_resume_completed",
+            stage_name="graph.extract",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            resumed_unique_chunk_count=resumed_unique_chunk_count,
+            resumed_chunk_count=resumed_chunk_count,
+        )
+
+    extraction_rows_by_chunk_id = {
+        row.document_chunk_id: row
+        for row in session.scalars(
+            select(ChunkExtraction).where(
+                ChunkExtraction.document_chunk_id.in_([chunk.id for chunk in chunk_rows])
+            )
+        ).all()
+    }
+    extracted_payloads: list[ChunkExtractionPayload] = []
+    for chunk_row in chunk_rows:
+        extraction_row = extraction_rows_by_chunk_id.get(chunk_row.id)
+        if extraction_row is None:
+            raise ValueError(f"Missing chunk extraction for chunk {chunk_row.id}")
+        extracted_payloads.append(
+            ChunkExtractionPayload.model_validate(extraction_row.extraction_json)
+        )
 
     extraction_object_key = str(
         PurePosixPath(document.tenant_id)
@@ -998,8 +1084,10 @@ def handle_graph_extract_stage(
     job.payload = {
         **job.payload,
         "extraction_count": len(extracted_payloads),
-        "extraction_unique_chunk_count": len(unique_chunk_requests),
-        "extraction_reused_chunk_count": len(chunk_rows) - len(unique_chunk_requests),
+        "extraction_unique_chunk_count": total_unique_chunk_count,
+        "extraction_reused_chunk_count": total_chunk_count - total_unique_chunk_count,
+        "extraction_resumed_unique_chunk_count": resumed_unique_chunk_count,
+        "extraction_resumed_chunk_count": resumed_chunk_count,
         "extraction_model": settings.openrouter_model_extraction,
         "extractions_artifact_bucket": stored.bucket_name,
         "extractions_artifact_key": stored.object_key,
@@ -1013,8 +1101,10 @@ def handle_graph_extract_stage(
         tenant_id=document.tenant_id,
         version_label=version.version_label,
         extraction_count=len(extracted_payloads),
-        unique_chunk_count=len(unique_extractions),
-        reused_chunk_count=len(chunk_rows) - len(unique_chunk_requests),
+        unique_chunk_count=total_unique_chunk_count,
+        pending_unique_chunk_count=len(unique_extractions),
+        resumed_unique_chunk_count=resumed_unique_chunk_count,
+        reused_chunk_count=total_chunk_count - total_unique_chunk_count,
         max_concurrency=settings.graph_extract_max_concurrency,
         extraction_model=settings.openrouter_model_extraction,
     )
@@ -1065,22 +1155,127 @@ def handle_graph_upsert_stage(
         raise ValueError(f"No chunk extractions found for document {document.id}")
 
     neo4j_client.ensure_schema()
-    clear_document_graph(
+    if not bool(job.payload.get("graph_reset_completed")):
+        clear_document_graph(
+            client=neo4j_client,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+        )
+        job.payload = {
+            **job.payload,
+            "graph_reset_completed": True,
+            "upserted_extraction_count": 0,
+            "upsert_total_extraction_count": len(extraction_rows),
+            "upsert_resumed_extraction_count": 0,
+        }
+        session.add(job)
+        session.commit()
+        logger.info(
+            "graph_upsert_reset_completed",
+            stage_name="graph.upsert",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            extraction_total_count=len(extraction_rows),
+        )
+
+    chunk_order = {chunk.id: index for index, chunk in enumerate(chunk_rows)}
+    extraction_rows = sorted(
+        extraction_rows,
+        key=lambda row: chunk_order.get(row.document_chunk_id, len(chunk_order)),
+    )
+    existing_graph_chunk_ids = list_document_graph_chunk_ids(
         client=neo4j_client,
         document_id=document.id,
         tenant_id=document.tenant_id,
     )
-    for row in extraction_rows:
+    resumed_rows = [
+        row for row in extraction_rows if row.document_chunk_id in existing_graph_chunk_ids
+    ]
+    pending_rows = [
+        row for row in extraction_rows if row.document_chunk_id not in existing_graph_chunk_ids
+    ]
+    total_extraction_count = len(extraction_rows)
+    resumed_extraction_count = len(resumed_rows)
+    completed_extraction_count = resumed_extraction_count
+    commit_interval = max(1, settings.graph_extract_commit_interval)
+    progress_interval = max(1, settings.graph_extract_progress_log_interval)
+    job.payload = {
+        **job.payload,
+        "upserted_extraction_count": completed_extraction_count,
+        "upsert_total_extraction_count": total_extraction_count,
+        "upsert_resumed_extraction_count": resumed_extraction_count,
+        "graph_backend": "neo4j",
+        "graph_version_label": version.version_label,
+    }
+    session.add(job)
+    session.commit()
+    logger.info(
+        "graph_upsert_initialized",
+        stage_name="graph.upsert",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        extraction_total_count=total_extraction_count,
+        resumed_extraction_count=resumed_extraction_count,
+        pending_extraction_count=len(pending_rows),
+        commit_interval=commit_interval,
+        progress_log_interval=progress_interval,
+    )
+
+    for pending_index, row in enumerate(pending_rows, start=1):
         payload = ChunkExtractionPayload.model_validate(row.extraction_json)
         upsert_extraction_payload(
             client=neo4j_client,
             payload=payload,
             document_title=document.title,
         )
+        completed_extraction_count += 1
+        job.payload = {
+            **job.payload,
+            "upserted_extraction_count": completed_extraction_count,
+            "upsert_total_extraction_count": total_extraction_count,
+            "upsert_resumed_extraction_count": resumed_extraction_count,
+        }
+        session.add(job)
+        if (
+            completed_extraction_count == total_extraction_count
+            or completed_extraction_count % commit_interval == 0
+        ):
+            session.commit()
+            logger.info(
+                "graph_upsert_batch_committed",
+                stage_name="graph.upsert",
+                job_id=job.id,
+                document_id=document.id,
+                tenant_id=document.tenant_id,
+                version_label=version.version_label,
+                completed_extraction_count=completed_extraction_count,
+                total_extraction_count=total_extraction_count,
+                resumed_extraction_count=resumed_extraction_count,
+            )
+        elif completed_extraction_count % progress_interval == 0:
+            logger.info(
+                "graph_upsert_progress",
+                stage_name="graph.upsert",
+                job_id=job.id,
+                document_id=document.id,
+                tenant_id=document.tenant_id,
+                version_label=version.version_label,
+                completed_extraction_count=completed_extraction_count,
+                total_extraction_count=total_extraction_count,
+                resumed_extraction_count=resumed_extraction_count,
+                pending_processed_count=pending_index,
+                pending_total_count=len(pending_rows),
+            )
 
     job.payload = {
         **job.payload,
-        "upserted_extraction_count": len(extraction_rows),
+        "upserted_extraction_count": total_extraction_count,
+        "upsert_total_extraction_count": total_extraction_count,
+        "upsert_resumed_extraction_count": resumed_extraction_count,
         "graph_backend": "neo4j",
         "graph_version_label": version.version_label,
     }
@@ -1092,7 +1287,9 @@ def handle_graph_upsert_stage(
         document_id=document.id,
         tenant_id=document.tenant_id,
         version_label=version.version_label,
-        upserted_extraction_count=len(extraction_rows),
+        upserted_extraction_count=total_extraction_count,
+        resumed_extraction_count=resumed_extraction_count,
+        pending_extraction_count=len(pending_rows),
         graph_backend="neo4j",
     )
 

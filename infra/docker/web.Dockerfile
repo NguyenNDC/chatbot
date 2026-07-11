@@ -2,30 +2,22 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate
 
-COPY package.json pnpm-workspace.yaml /app/
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml /app/
 COPY apps/web/package.json /app/apps/web/package.json
 
-RUN pnpm install --filter web... --no-frozen-lockfile
+RUN pnpm install --filter web... --frozen-lockfile --prod=false
 
-COPY . /app
+COPY apps/web /app/apps/web
 
 RUN pnpm --filter web build
 
-FROM node:22-alpine AS runner
+FROM nginx:1.27-alpine AS runner
 
-WORKDIR /app
-
-ENV NODE_ENV=production
-
-RUN corepack enable
-
-COPY --from=builder /app/apps/web/.next/standalone /app
-COPY --from=builder /app/apps/web/.next/static /app/apps/web/.next/static
-COPY --from=builder /app/apps/web/public /app/apps/web/public
-COPY infra/docker/web-entrypoint.sh /app/infra/docker/web-entrypoint.sh
+COPY --from=builder /app/apps/web/dist /usr/share/nginx/html
+COPY infra/docker/web-nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 3000
 
-ENTRYPOINT ["sh", "/app/infra/docker/web-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]
