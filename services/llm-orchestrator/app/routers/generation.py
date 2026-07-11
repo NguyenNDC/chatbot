@@ -74,6 +74,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             answer=REFUSAL_TEMPLATE,
             answer_type=AnswerDisposition.REFUSAL,
             citations=[],
+            contexts=[],
             policy_summary=["refusal", "prompt-injection-protection", "grounding-policy"],
             refusal_reason="prompt_injection_suspected",
         )
@@ -85,6 +86,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             answer=NO_ANSWER_TEMPLATE,
             answer_type=AnswerDisposition.NO_ANSWER,
             citations=[],
+            contexts=[],
             policy_summary=["no-answer", "grounded-answer-only", "cite-source-required"],
         )
 
@@ -96,6 +98,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             answer=CLARIFICATION_TEMPLATE,
             answer_type=AnswerDisposition.CLARIFICATION,
             citations=[],
+            contexts=selected_contexts,
             policy_summary=["clarification", "needs-more-context", "grounded-answer-only"],
             clarification_question=build_clarification_question(payload.question),
         )
@@ -133,6 +136,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             answer=fallback["answer"],
             answer_type=fallback["answer_type"],
             citations=fallback["citations"],
+            contexts=selected_contexts,
             policy_summary=fallback["policy_summary"],
         )
 
@@ -165,6 +169,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
         answer=answer_text,
         answer_type=disposition,
         citations=citations,
+        contexts=selected_contexts,
         policy_summary=policy_summary,
         clarification_question=clarification_question,
         refusal_reason=refusal_reason,

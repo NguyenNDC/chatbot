@@ -110,6 +110,7 @@ function readableMessageContent(content: string) {
 
 function citationLabel(citation: {
   title: string;
+  file_name?: string | null;
   section?: string | null;
   page?: number | null;
   document_label?: string | null;
@@ -117,6 +118,15 @@ function citationLabel(citation: {
   article?: string | null;
   source_label?: string | null;
 }) {
+  const fileLabel = citation.file_name?.trim();
+  if (fileLabel && citation.source_label?.trim()) {
+    return `${fileLabel} - ${citation.source_label.trim()}`;
+  }
+  if (fileLabel) {
+    const location = [citation.chapter, citation.article || citation.section].filter(Boolean).join(" - ");
+    const page = citation.page ? `trang ${citation.page}` : "";
+    return [fileLabel, location, page].filter(Boolean).join(" - ");
+  }
   if (citation.source_label?.trim()) {
     return citation.source_label.trim();
   }
@@ -135,6 +145,38 @@ function citationLocation(citation: {
   const location = [citation.chapter, citation.article || citation.section].filter(Boolean).join(" · ") || "Không rõ chương/điều";
   const page = citation.page ? `Trang ${citation.page}` : "Không rõ trang";
   return `${location} · ${page}`;
+}
+
+function citationSummary(citations: Array<{
+  title: string;
+  file_name?: string | null;
+  section?: string | null;
+  page?: number | null;
+  document_label?: string | null;
+  chapter?: string | null;
+  article?: string | null;
+  source_label?: string | null;
+}>) {
+  const labels: string[] = [];
+  const seen = new Set<string>();
+
+  for (const citation of citations) {
+    const label = citationLabel(citation);
+    const normalized = label.toLowerCase();
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    labels.push(label);
+  }
+
+  if (labels.length === 0) {
+    return "";
+  }
+  if (labels.length <= 2) {
+    return labels.join("; ");
+  }
+  return `${labels.slice(0, 2).join("; ")}; +${labels.length - 2} nguon khac`;
 }
 
 function knowledgeStatus(documents: DocumentRecord[]) {
@@ -419,20 +461,20 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
             ) : (
               <div className="grid gap-5">
                 {messages.map((message) => (
-                  <article className={cx("flex gap-3", message.role === "user" && "justify-end")} key={message.id}>
+                  <article className={cx("flex min-w-0 gap-3", message.role === "user" && "justify-end")} key={message.id}>
                     {message.role !== "user" ? (
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-slate-100 text-ink-800">
                         {message.role === "assistant" ? <Bot className="h-5 w-5" /> : <MessageSquarePlus className="h-5 w-5" />}
                       </div>
                     ) : null}
-                    <div className={cx("grid max-w-[840px] gap-2", message.role === "user" && "justify-items-end")}>
+                    <div className={cx("grid min-w-0 w-full max-w-[840px] gap-2", message.role === "user" && "justify-items-end")}>
                       <div className="flex items-center gap-2 text-xs text-slate-500">
                         <strong className="text-slate-700">{message.role === "user" ? "Ban" : message.role === "assistant" ? "Chatbot" : "He thong"}</strong>
                         <span>{formatTime(message.created_at)}</span>
                       </div>
                       <div
                         className={cx(
-                          "grid gap-3 rounded-lg border px-4 py-3 text-sm leading-7 shadow-sm",
+                          "grid min-w-0 gap-3 overflow-hidden rounded-lg border px-4 py-3 text-sm leading-7 shadow-sm",
                           message.role === "user"
                             ? "border-ocean-200 bg-ocean-50 text-ink-950"
                             : message.role === "system"
@@ -440,8 +482,13 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                               : "border-slate-200 bg-white text-ink-950",
                         )}
                       >
-                        <div className="whitespace-pre-wrap">{message.pending ? "Dang soan cau tra loi..." : readableMessageContent(message.content)}</div>
+                        <div className="whitespace-pre-wrap break-words">{message.pending ? "Dang soan cau tra loi..." : readableMessageContent(message.content)}</div>
                         {message.answer_type && message.answer_type !== "grounded" ? <span className="badge-neutral w-fit">{answerLabel(message.answer_type)}</span> : null}
+                        {message.citations.length > 0 ? (
+                          <div className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-6 text-slate-600">
+                            <strong className="text-slate-700">Trich tu:</strong> {citationSummary(message.citations)}
+                          </div>
+                        ) : null}
                         {message.citations.length > 0 ? (
                           <div className="grid gap-2">
                             <div className="text-xs font-bold uppercase tracking-normal text-slate-500">Nguồn tham chiếu</div>
@@ -457,7 +504,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                                 >
                                   <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ocean-600" />
                                   <span className="min-w-0">
-                                    <strong className="block truncate">{citation.document_label || citation.title}</strong>
+                                    <strong className="block truncate">{citation.file_name || citation.document_label || citation.title}</strong>
                                     <span className="block truncate">{citationLocation(citation)}</span>
                                   </span>
                                 </a>
@@ -466,17 +513,17 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                           </div>
                         ) : null}
                         {message.contexts.length > 0 ? (
-                          <details className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                            <summary className="cursor-pointer text-xs font-bold text-ocean-700">Evidence da dung ({message.contexts.length})</summary>
-                            <div className="mt-3 grid gap-2">
+                          <details className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-slate-50 p-3">
+                            <summary className="cursor-pointer pr-6 text-xs font-bold text-ocean-700">Evidence da dung ({message.contexts.length})</summary>
+                            <div className="mt-3 grid min-w-0 gap-2">
                               {message.contexts.slice(0, 4).map((context) => (
-                                <div className="rounded-md bg-white p-3 text-xs leading-5 text-slate-600" key={`${message.id}-${context.chunk_id}`}>
-                                  <div className="mb-1 flex items-center justify-between gap-2">
-                                    <strong className="truncate text-slate-800">{context.source.document_label || context.source.title}</strong>
-                                    <span>{context.final_score?.toFixed(3) ?? context.score.toFixed(3)}</span>
+                                <div className="min-w-0 overflow-hidden rounded-md bg-white p-3 text-xs leading-5 text-slate-600" key={`${message.id}-${context.chunk_id}`}>
+                                  <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
+                                    <strong className="min-w-0 flex-1 truncate text-slate-800">{context.source.document_label || context.source.title}</strong>
+                                    <span className="shrink-0">{context.final_score?.toFixed(3) ?? context.score.toFixed(3)}</span>
                                   </div>
-                                  <div className="mb-1 text-slate-500">{citationLocation(context.source)}</div>
-                                  {context.content.slice(0, 260)}...
+                                  <div className="mb-1 break-words text-slate-500">{citationLocation(context.source)}</div>
+                                  <div className="break-words whitespace-pre-wrap">{context.content.slice(0, 260)}...</div>
                                 </div>
                               ))}
                             </div>

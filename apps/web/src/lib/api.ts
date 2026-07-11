@@ -15,6 +15,7 @@ export type Citation = {
   document_id: string;
   document_version_id?: string | null;
   title: string;
+  file_name?: string | null;
   section: string;
   section_path?: string[];
   page?: number | null;

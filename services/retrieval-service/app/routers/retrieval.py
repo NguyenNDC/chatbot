@@ -168,6 +168,7 @@ def build_citation(
         document_id=document.id,
         document_version_id=version.id,
         title=document.title,
+        file_name=document.file_name,
         section=section,
         section_path=chunk.heading_path,
         page=source_page,
@@ -222,13 +223,13 @@ def infer_document_label(db: Session, document: Document, version: DocumentVersi
     )
     header_text = "\n".join(chunk.content[:500] for chunk in rows)
     patterns = [
-        r"(NGHỊ\s+ĐỊNH|NGHI\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
-        r"(LUẬT|LUAT)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
-        r"(THÔNG\s+TƯ|THONG\s+TU)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
-        r"(QUYẾT\s+ĐỊNH|QUYET\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
+        r"^\s*(NGHỊ\s+ĐỊNH|NGHI\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)[^\n]{0,120}",
+        r"^\s*(LUẬT|LUAT)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)[^\n]{0,120}",
+        r"^\s*(THÔNG\s+TƯ|THONG\s+TU)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)[^\n]{0,120}",
+        r"^\s*(QUYẾT\s+ĐỊNH|QUYET\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)[^\n]{0,120}",
     ]
     for pattern in patterns:
-        match = re.search(pattern, header_text, flags=re.IGNORECASE)
+        match = re.search(pattern, header_text, flags=re.IGNORECASE | re.MULTILINE)
         if match:
             label = " ".join(match.group(0).split()).strip(" -–—.")
             if 4 <= len(label) <= 180:
@@ -326,9 +327,22 @@ def infer_section_label(
     section_name = (chunk.section_name or "").strip()
     if section_name and section_name.lower() not in {"paragraph", "body"}:
         return section_name
+    numbered_section = infer_numbered_section_label(chunk)
+    if numbered_section:
+        return numbered_section
     if chunk.page_start is not None:
         return f"Trang {chunk.page_start}"
-    return "Không rõ chương/điều"
+    return "Doan trich"
+
+
+def infer_numbered_section_label(chunk: DocumentChunk) -> str | None:
+    match = re.search(r"(?:^|\n)\s*(\d{1,3})[.)]\s+([^\n]{0,120})", chunk.content[:500])
+    if not match:
+        return None
+    title = " ".join((match.group(2) or "").split()).strip(" -–—.")
+    if title:
+        return f"Muc {match.group(1)}. {title}"
+    return f"Muc {match.group(1)}"
 
 
 def build_source_label(
@@ -345,7 +359,8 @@ def build_source_label(
         parts.append(article)
     if not chapter and not article:
         parts.append(section)
-    parts.append(f"trang {page}" if page is not None else "không rõ trang")
+    if page is not None:
+        parts.append(f"trang {page}")
     return " - ".join(part for part in parts if part)
 
 

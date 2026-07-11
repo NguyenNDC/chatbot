@@ -294,6 +294,7 @@ class Citation(BaseModel):
     document_id: str
     document_version_id: str | None = None
     title: str
+    file_name: str | None = None
     section: str
     section_path: list[str] = Field(default_factory=list)
     page: int | None = None
@@ -437,6 +438,7 @@ class GenerateAnswerResponse(BaseModel):
     answer: str
     answer_type: AnswerDisposition = AnswerDisposition.GROUNDED
     citations: list[Citation]
+    contexts: list[RetrievalChunk] = Field(default_factory=list)
     policy_summary: list[str] = Field(default_factory=list)
     clarification_question: str | None = None
     refusal_reason: str | None = None

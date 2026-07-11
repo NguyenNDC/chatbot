@@ -52,6 +52,9 @@ REFERENTIAL_MARKERS = (
 )
 
 CHAT_HISTORY_LIMIT = 12
+RETRIEVAL_HISTORY_USER_TURNS = 2
+RETRIEVAL_HISTORY_ASSISTANT_TURNS = 1
+RETRIEVAL_TURN_CHAR_LIMIT = 280
 
 GREETING_PATTERNS = {
     "good morning",
@@ -128,6 +131,20 @@ AMBIGUOUS_FOLLOWUP_PATTERNS = {
     "tiep di",
     "ke tiep",
 }
+FOLLOWUP_SHORT_PATTERNS = {
+    "them",
+    "them nua",
+    "tiep",
+    "tiep nua",
+    "noi tiep",
+    "sao",
+    "tai sao",
+    "vi sao",
+    "the nao",
+    "ra sao",
+    "la sao",
+    "gom gi",
+}
 UNSUPPORTED_PATTERNS = {
     "du bao thoi tiet",
     "thoi tiet",
@@ -200,6 +217,36 @@ def has_knowledge_signal(normalized_message: str) -> bool:
     return contains_any(normalized_message, KNOWLEDGE_MARKERS)
 
 
+def has_previous_assistant_answer(conversation_history: list[ConversationTurn]) -> bool:
+    return any(turn.role == "assistant" and turn.content.strip() for turn in conversation_history)
+
+
+def trim_history_text(content: str, limit: int = RETRIEVAL_TURN_CHAR_LIMIT) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def is_contextual_followup(
+    normalized_message: str,
+    conversation_history: list[ConversationTurn],
+) -> bool:
+    if not has_previous_assistant_answer(conversation_history):
+        return False
+    if is_exact_or_short_match(normalized_message, AMBIGUOUS_FOLLOWUP_PATTERNS, max_tokens=7):
+        return True
+    if contains_any(normalized_message, set(REFERENTIAL_MARKERS)):
+        return True
+    return (
+        token_count(normalized_message) <= 4
+        and (
+            normalized_message in FOLLOWUP_SHORT_PATTERNS
+            or contains_any(normalized_message, FOLLOWUP_SHORT_PATTERNS)
+        )
+    )
+
+
 def classify_chat_intent(message: str, conversation_history: list[ConversationTurn]) -> str:
     normalized = normalize_chat_text(message)
     if not normalized:
@@ -215,6 +262,8 @@ def classify_chat_intent(message: str, conversation_history: list[ConversationTu
         return "thanks"
     if is_exact_or_short_match(normalized, GOODBYE_PATTERNS, max_tokens=6):
         return "goodbye"
+    if is_contextual_followup(normalized, conversation_history):
+        return "knowledge_query"
     if is_exact_or_short_match(normalized, ACK_PATTERNS, max_tokens=4):
         return "ack"
     if is_exact_or_short_match(normalized, HELP_PATTERNS, max_tokens=9):
@@ -222,7 +271,7 @@ def classify_chat_intent(message: str, conversation_history: list[ConversationTu
     if is_exact_or_short_match(normalized, BOT_IDENTITY_PATTERNS, max_tokens=8):
         return "bot_identity"
     if is_exact_or_short_match(normalized, AMBIGUOUS_FOLLOWUP_PATTERNS, max_tokens=7):
-        has_previous_answer = any(turn.role == "assistant" for turn in conversation_history)
+        has_previous_answer = has_previous_assistant_answer(conversation_history)
         return "knowledge_query" if has_previous_answer else "clarification"
     if has_knowledge_signal(normalized):
         return "knowledge_query"
@@ -298,11 +347,21 @@ def build_retrieval_question(payload: QueryRequest) -> str:
         turn.content.strip()
         for turn in payload.conversation_history
         if turn.role == "user" and turn.content.strip()
-    ][-2:]
-    if not recent_user_turns:
+    ][-RETRIEVAL_HISTORY_USER_TURNS:]
+    recent_assistant_turns = [
+        trim_history_text(turn.content)
+        for turn in payload.conversation_history
+        if turn.role == "assistant" and turn.content.strip()
+    ][-RETRIEVAL_HISTORY_ASSISTANT_TURNS:]
+
+    expansion_parts = [*recent_user_turns]
+    if any(marker in lowered for marker in REFERENTIAL_MARKERS):
+        expansion_parts.extend(recent_assistant_turns)
+
+    if not expansion_parts:
         return question
 
-    return " ".join([*recent_user_turns, question])
+    return " ".join([*expansion_parts, question])
 
 
 def build_conversation_history(messages: list[ChatMessageItem]) -> list[ConversationTurn]:
@@ -356,7 +415,7 @@ async def run_query_pipeline(payload: QueryRequest) -> QueryResponse:
         answer=answer.answer,
         answer_type=answer.answer_type,
         citations=answer.citations,
-        contexts=retrieval_data["contexts"],
+        contexts=answer.contexts,
         policy_summary=answer.policy_summary,
         clarification_question=answer.clarification_question,
     )
