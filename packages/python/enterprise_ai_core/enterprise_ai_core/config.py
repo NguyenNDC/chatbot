@@ -98,10 +98,10 @@ class ServiceSettings(BaseSettings):
         default=6, alias="GRAPH_EXTRACT_MAX_CONCURRENCY"
     )
     graph_extract_progress_log_interval: int = Field(
-        default=25, alias="GRAPH_EXTRACT_PROGRESS_LOG_INTERVAL"
+        default=10, alias="GRAPH_EXTRACT_PROGRESS_LOG_INTERVAL"
     )
     graph_extract_commit_interval: int = Field(
-        default=10, alias="GRAPH_EXTRACT_COMMIT_INTERVAL"
+        default=5, alias="GRAPH_EXTRACT_COMMIT_INTERVAL"
     )
     retrieval_graph_hops: int = Field(default=2, alias="RETRIEVAL_GRAPH_HOPS")
     retrieval_graph_candidate_limit: int = Field(

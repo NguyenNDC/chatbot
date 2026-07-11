@@ -71,8 +71,19 @@ class DocumentItem(BaseModel):
     source: str = "rustfs"
     checksum_sha256: str | None = None
     size_bytes: int | None = None
+    current_job_id: str | None = None
     current_job_type: str | None = None
     current_job_status: JobStatus | None = None
+    current_job_error_message: str | None = None
+    processing_stage: str | None = None
+    processing_stage_label: str | None = None
+    processing_stage_status: JobStatus | None = None
+    processing_progress_percent: int = 0
+    processing_progress_current: int | None = None
+    processing_progress_total: int | None = None
+    processing_progress_label: str = ""
+    processing_progress_detail: str | None = None
+    processing_mode: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -148,6 +159,14 @@ class ProcessingJobItem(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     parent_job_id: str | None = None
+    stage_label: str | None = None
+    version_label: str | None = None
+    processing_mode: str | None = None
+    progress_percent: int = 0
+    progress_current: int | None = None
+    progress_total: int | None = None
+    progress_label: str = ""
+    progress_detail: str | None = None
 
 
 class ProcessingJobListResponse(BaseModel):
@@ -296,6 +315,11 @@ class RetrievalChunk(BaseModel):
     query_path: list[str] = Field(default_factory=list)
 
 
+class ConversationTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class QueryRequest(BaseModel):
     tenant_id: str
     question: str
@@ -306,6 +330,7 @@ class QueryRequest(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
     version_ids: list[str] = Field(default_factory=list)
     effective_at: datetime | None = None
+    conversation_history: list["ConversationTurn"] = Field(default_factory=list)
 
 
 class QueryResponse(BaseModel):
@@ -324,6 +349,7 @@ class GenerateAnswerRequest(BaseModel):
     question: str
     contexts: list[RetrievalChunk]
     retrieval_plan: dict = Field(default_factory=dict)
+    conversation_history: list["ConversationTurn"] = Field(default_factory=list)
 
 
 class GenerateAnswerResponse(BaseModel):

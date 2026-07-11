@@ -99,7 +99,12 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
         )
 
     citation_map = {item.chunk_id: item.source for item in selected_contexts}
-    messages = build_answer_messages(payload.question, selected_contexts, payload.retrieval_plan)
+    messages = build_answer_messages(
+        payload.question,
+        selected_contexts,
+        payload.retrieval_plan,
+        payload.conversation_history,
+    )
     model_name = settings.openrouter_model_primary
     answer_payload: dict | None = None
     for candidate_model in choose_models():

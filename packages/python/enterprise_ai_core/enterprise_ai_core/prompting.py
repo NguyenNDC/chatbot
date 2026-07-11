@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .schemas import RetrievalChunk
+from .schemas import ConversationTurn, RetrievalChunk
 
 CORE_INSTRUCTION = """
 You are an enterprise knowledge assistant.
@@ -40,8 +40,14 @@ CLARIFICATION_TEMPLATE = (
 )
 
 
-def build_answer_messages(question: str, contexts: list[RetrievalChunk], retrieval_plan: dict) -> list[dict]:
+def build_answer_messages(
+    question: str,
+    contexts: list[RetrievalChunk],
+    retrieval_plan: dict,
+    conversation_history: list[ConversationTurn] | None = None,
+) -> list[dict]:
     context_block = render_context_block(contexts)
+    history_block = render_history_block(conversation_history or [])
     return [
         {"role": "system", "content": CORE_INSTRUCTION},
         {"role": "system", "content": POLICY_INSTRUCTION},
@@ -50,12 +56,25 @@ def build_answer_messages(question: str, contexts: list[RetrievalChunk], retriev
             "role": "user",
             "content": (
                 f"Question:\n{question}\n\n"
+                f"{history_block}"
                 f"Retrieval plan:\n{retrieval_plan}\n\n"
                 "Use only the evidence below. Return a structured answer.\n\n"
                 f"{context_block}"
             ),
         },
     ]
+
+
+def render_history_block(history: list[ConversationTurn]) -> str:
+    if not history:
+        return ""
+
+    recent_turns = history[-6:]
+    lines = ["Conversation history:"]
+    for turn in recent_turns:
+        speaker = "User" if turn.role == "user" else "Assistant"
+        lines.append(f"{speaker}: {turn.content}")
+    return "\n".join(lines) + "\n\n"
 
 
 def render_context_block(contexts: list[RetrievalChunk]) -> str:

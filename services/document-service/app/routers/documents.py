@@ -24,6 +24,7 @@ from enterprise_ai_core.models import (
     ProcessingJob,
     Tenant,
 )
+from enterprise_ai_core.progress import build_document_progress_snapshot, build_job_progress_snapshot
 from enterprise_ai_core.queue import get_celery_app
 from enterprise_ai_core.schemas import (
     DocumentDeleteResponse,
@@ -51,7 +52,44 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def build_document_item(document: Document, latest_job: ProcessingJob | None) -> DocumentItem:
+def build_processing_job_item(job: ProcessingJob) -> ProcessingJobItem:
+    snapshot = build_job_progress_snapshot(job)
+    return ProcessingJobItem(
+        id=job.id,
+        tenant_id=job.tenant_id,
+        document_id=job.document_id,
+        job_type=job.job_type,
+        queue_name=job.queue_name,
+        status=JobStatus(job.status),
+        celery_task_id=job.celery_task_id,
+        attempts=job.attempts,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        parent_job_id=job.parent_job_id,
+        stage_label=snapshot.stage_label,
+        version_label=snapshot.version_label,
+        processing_mode=snapshot.processing_mode,
+        progress_percent=snapshot.progress_percent,
+        progress_current=snapshot.progress_current,
+        progress_total=snapshot.progress_total,
+        progress_label=snapshot.progress_label,
+        progress_detail=snapshot.progress_detail,
+    )
+
+
+def build_document_item(
+    document: Document,
+    jobs: list[ProcessingJob],
+    current_version: DocumentVersion | None,
+) -> DocumentItem:
+    progress = build_document_progress_snapshot(
+        document_status=document.status,
+        jobs=jobs,
+        current_version_id=current_version.id if current_version else None,
+    )
+    current_job = progress.selected_job
     return DocumentItem(
         id=document.id,
         tenant_id=document.tenant_id,
@@ -64,8 +102,19 @@ def build_document_item(document: Document, latest_job: ProcessingJob | None) ->
         source=document.source,
         checksum_sha256=document.checksum_sha256,
         size_bytes=document.size_bytes,
-        current_job_type=latest_job.job_type if latest_job else None,
-        current_job_status=JobStatus(latest_job.status) if latest_job else None,
+        current_job_id=current_job.id if current_job else None,
+        current_job_type=current_job.job_type if current_job else None,
+        current_job_status=JobStatus(current_job.status) if current_job else None,
+        current_job_error_message=current_job.error_message if current_job else None,
+        processing_stage=progress.stage,
+        processing_stage_label=progress.stage_label,
+        processing_stage_status=JobStatus(progress.stage_status) if progress.stage_status else None,
+        processing_progress_percent=progress.progress_percent,
+        processing_progress_current=progress.progress_current,
+        processing_progress_total=progress.progress_total,
+        processing_progress_label=progress.progress_label,
+        processing_progress_detail=progress.progress_detail,
+        processing_mode=progress.processing_mode,
         created_at=document.created_at,
     )
 
@@ -343,7 +392,41 @@ async def list_documents(
         .order_by(Document.created_at.desc())
     )
     documents = list(db.scalars(statement).all())
-    items = [build_document_item(item, latest_job_for_document(db, item.id)) for item in documents]
+    document_ids = [item.id for item in documents]
+    jobs_by_document: dict[str, list[ProcessingJob]] = {}
+    current_versions_by_document: dict[str, DocumentVersion] = {}
+
+    if document_ids:
+        all_jobs = list(
+            db.scalars(
+                select(ProcessingJob)
+                .where(ProcessingJob.document_id.in_(document_ids))
+                .order_by(ProcessingJob.created_at.desc())
+            ).all()
+        )
+        for job in all_jobs:
+            jobs_by_document.setdefault(job.document_id, []).append(job)
+
+        current_versions = list(
+            db.scalars(
+                select(DocumentVersion).where(
+                    DocumentVersion.document_id.in_(document_ids),
+                    DocumentVersion.is_current.is_(True),
+                )
+            ).all()
+        )
+        current_versions_by_document = {
+            version.document_id: version for version in current_versions
+        }
+
+    items = [
+        build_document_item(
+            item,
+            jobs_by_document.get(item.id, []),
+            current_versions_by_document.get(item.id),
+        )
+        for item in documents
+    ]
     return DocumentListResponse(items=items, total=len(items))
 
 
@@ -356,7 +439,14 @@ async def get_document(
     document = get_document_for_tenant(db, document_id, tenant_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    return build_document_item(document, latest_job_for_document(db, document.id))
+    jobs = list(
+        db.scalars(
+            select(ProcessingJob)
+            .where(ProcessingJob.document_id == document.id)
+            .order_by(ProcessingJob.created_at.desc())
+        ).all()
+    )
+    return build_document_item(document, jobs, current_version_for_document(db, document.id))
 
 
 @router.get("/documents/{document_id}/versions", response_model=DocumentVersionListResponse)
@@ -411,8 +501,12 @@ async def upload_document(
         if not existing_job or not existing_version:
             raise HTTPException(status_code=409, detail="Duplicate document exists without job")
         return UploadAcceptedResponse(
-            document=build_document_item(existing_document, existing_job),
-            root_job=ProcessingJobItem.model_validate(existing_job),
+            document=build_document_item(
+                existing_document,
+                [existing_job],
+                current_version_for_document(db, existing_document.id),
+            ),
+            root_job=build_processing_job_item(existing_job),
             object_key=existing_version.object_key,
             version=build_version_item(existing_version),
         )
@@ -489,8 +583,8 @@ async def upload_document(
 
     enqueue_root_job(db, root_job=root_job, document=document, tenant_id=tenant_id)
     return UploadAcceptedResponse(
-        document=build_document_item(document, root_job),
-        root_job=ProcessingJobItem.model_validate(root_job),
+        document=build_document_item(document, [root_job], version),
+        root_job=build_processing_job_item(root_job),
         object_key=stored_object.object_key,
         version=build_version_item(version),
     )
@@ -534,8 +628,8 @@ async def upload_document_version(
     )
     enqueue_root_job(db, root_job=root_job, document=document, tenant_id=document.tenant_id)
     return UploadAcceptedResponse(
-        document=build_document_item(document, root_job),
-        root_job=ProcessingJobItem.model_validate(root_job),
+        document=build_document_item(document, [root_job], version),
+        root_job=build_processing_job_item(root_job),
         object_key=version.object_key,
         version=build_version_item(version),
     )
@@ -588,7 +682,7 @@ async def reprocess_document(
     db.refresh(root_job)
     db.refresh(document)
     enqueue_root_job(db, root_job=root_job, document=document, tenant_id=document.tenant_id)
-    return ProcessingJobItem.model_validate(root_job)
+    return build_processing_job_item(root_job)
 
 
 @router.delete("/documents/{document_id}", response_model=DocumentDeleteResponse)

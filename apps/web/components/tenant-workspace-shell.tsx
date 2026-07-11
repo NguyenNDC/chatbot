@@ -1,7 +1,7 @@
 import Link from "next/link";
 
+import { ChatPanel } from "./chat-panel";
 import { DocumentPanel } from "./document-panel";
-import { QueryPanel } from "./query-panel";
 
 export function TenantWorkspaceShell({ tenantId }: { tenantId: string }) {
   return (
@@ -12,7 +12,7 @@ export function TenantWorkspaceShell({ tenantId }: { tenantId: string }) {
             <div className="eyebrow">Tenant Workspace</div>
             <h1 className="page-title">{tenantId}</h1>
             <p className="muted">
-              Man hinh van hanh 2 nua: ben trai quan ly tai lieu va preview OCR, ben phai chat/query theo tenant.
+              Man hinh van hanh 2 nua: ben trai quan ly tai lieu va preview OCR, ben phai la chatbot noi bo su dung kho tri thuc cua tenant.
             </p>
           </div>
           <Link className="button ghost" href="/tenants">
@@ -23,7 +23,7 @@ export function TenantWorkspaceShell({ tenantId }: { tenantId: string }) {
 
       <section className="workspace-grid">
         <DocumentPanel tenantId={tenantId} />
-        <QueryPanel tenantId={tenantId} />
+        <ChatPanel tenantId={tenantId} />
       </section>
     </main>
   );

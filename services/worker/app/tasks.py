@@ -23,6 +23,7 @@ from enterprise_ai_core.models import (
 )
 from enterprise_ai_core.openrouter import OpenRouterClient
 from enterprise_ai_core.parsing import build_canonical_document
+from enterprise_ai_core.progress import build_job_progress_snapshot
 from enterprise_ai_core.queue import get_celery_app
 from enterprise_ai_core.schemas import CanonicalDocument, ChunkExtractionPayload, DocumentStatus, JobStatus
 from enterprise_ai_core.storage import RustFSStorageClient
@@ -384,6 +385,19 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         job.status = JobStatus.COMPLETED.value
         job.completed_at = utcnow()
         session.add(job)
+        progress_snapshot = build_job_progress_snapshot(job)
+        logger.info(
+            "document_pipeline_checkpoint",
+            stage_name=stage_name,
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            progress_percent=progress_snapshot.progress_percent,
+            progress_label=progress_snapshot.progress_label,
+            progress_detail=progress_snapshot.progress_detail,
+            processing_mode=progress_snapshot.processing_mode,
+        )
 
         next_stage = NEXT_STAGE[stage_name]
         if next_stage is None:
@@ -849,17 +863,35 @@ def handle_graph_extract_stage(
     for chunk_row in chunk_rows:
         chunk_groups.setdefault(chunk_row.content_hash, []).append(chunk_row)
 
-    unique_chunk_requests = [
-        {
-            "chunk_id": group[0].id,
-            "content": group[0].content,
-            "section_name": group[0].section_name,
-        }
-        for group in chunk_groups.values()
-    ]
+    unique_chunk_requests: list[dict[str, str]] = []
+    chunk_group_by_request_id: dict[str, list[DocumentChunk]] = {}
+    for group in chunk_groups.values():
+        representative = group[0]
+        unique_chunk_requests.append(
+            {
+                "chunk_id": representative.id,
+                "content": representative.content,
+                "section_name": representative.section_name,
+            }
+        )
+        chunk_group_by_request_id[representative.id] = group
     progress_interval = max(1, settings.graph_extract_progress_log_interval)
     commit_interval = max(1, settings.graph_extract_commit_interval)
     completed_chunk_count = 0
+    logger.info(
+        "graph_extract_initialized",
+        stage_name="graph.extract",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        total_chunks=len(chunk_rows),
+        unique_chunk_count=len(unique_chunk_requests),
+        reused_chunk_count=len(chunk_rows) - len(unique_chunk_requests),
+        max_concurrency=settings.graph_extract_max_concurrency,
+        commit_interval=commit_interval,
+        progress_log_interval=progress_interval,
+    )
 
     def log_extract_progress(completed: int, total: int) -> None:
         if completed == total or completed % progress_interval == 0:
@@ -882,7 +914,11 @@ def handle_graph_extract_stage(
     ) -> None:
         nonlocal completed_chunk_count
 
-        grouped_rows = chunk_groups[payload.document_chunk_id]
+        grouped_rows = chunk_group_by_request_id.get(payload.document_chunk_id)
+        if grouped_rows is None:
+            raise KeyError(
+                f"Missing chunk group for extraction payload {payload.document_chunk_id}"
+            )
         for chunk_row in grouped_rows:
             extraction = (
                 payload
@@ -912,6 +948,18 @@ def handle_graph_extract_stage(
             or completed_unique_chunks % commit_interval == 0
         ):
             session.commit()
+            logger.info(
+                "graph_extract_batch_committed",
+                stage_name="graph.extract",
+                job_id=job.id,
+                document_id=document.id,
+                tenant_id=document.tenant_id,
+                version_label=version.version_label,
+                completed_unique_chunks=completed_unique_chunks,
+                total_unique_chunks=total_unique_chunks,
+                completed_chunks=completed_chunk_count,
+                total_chunks=len(chunk_rows),
+            )
 
     unique_extractions = run_parallel_chunk_extractions(
         client=openrouter_client,

@@ -4,9 +4,37 @@ from sqlalchemy.orm import Session
 
 from enterprise_ai_core.db import get_db_session
 from enterprise_ai_core.models import ProcessingJob
+from enterprise_ai_core.progress import build_job_progress_snapshot
 from enterprise_ai_core.schemas import ProcessingJobItem, ProcessingJobListResponse
 
 router = APIRouter(tags=["jobs"])
+
+
+def build_processing_job_item(job: ProcessingJob) -> ProcessingJobItem:
+    snapshot = build_job_progress_snapshot(job)
+    return ProcessingJobItem(
+        id=job.id,
+        tenant_id=job.tenant_id,
+        document_id=job.document_id,
+        job_type=job.job_type,
+        queue_name=job.queue_name,
+        status=job.status,
+        celery_task_id=job.celery_task_id,
+        attempts=job.attempts,
+        error_message=job.error_message,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        parent_job_id=job.parent_job_id,
+        stage_label=snapshot.stage_label,
+        version_label=snapshot.version_label,
+        processing_mode=snapshot.processing_mode,
+        progress_percent=snapshot.progress_percent,
+        progress_current=snapshot.progress_current,
+        progress_total=snapshot.progress_total,
+        progress_label=snapshot.progress_label,
+        progress_detail=snapshot.progress_detail,
+    )
 
 
 @router.get("/jobs", response_model=ProcessingJobListResponse)
@@ -22,7 +50,7 @@ async def list_jobs(
         .limit(limit)
     )
     jobs = list(db.scalars(statement).all())
-    items = [ProcessingJobItem.model_validate(job) for job in jobs]
+    items = [build_processing_job_item(job) for job in jobs]
     return ProcessingJobListResponse(items=items, total=len(items))
 
 
@@ -39,5 +67,5 @@ async def get_job(
     job = db.scalars(statement).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return ProcessingJobItem.model_validate(job)
+    return build_processing_job_item(job)
 

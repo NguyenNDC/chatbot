@@ -2,6 +2,7 @@ const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, "") ?? "http://localhost:8000";
 
 export type QueryMode = "auto" | "lookup" | "summary" | "compare" | "temporal";
+export type ConversationRole = "user" | "assistant";
 
 export type TenantRecord = {
   id: string;
@@ -41,6 +42,11 @@ export type QueryResult = {
   clarification_question?: string | null;
 };
 
+export type ConversationTurn = {
+  role: ConversationRole;
+  content: string;
+};
+
 export type ParsedPreview = {
   document_id: string;
   document_version_id: string;
@@ -72,8 +78,19 @@ export type DocumentRecord = {
   tags?: string[];
   checksum_sha256?: string | null;
   size_bytes?: number | null;
+  current_job_id?: string | null;
   current_job_type?: string | null;
   current_job_status?: string | null;
+  current_job_error_message?: string | null;
+  processing_stage?: string | null;
+  processing_stage_label?: string | null;
+  processing_stage_status?: string | null;
+  processing_progress_percent: number;
+  processing_progress_current?: number | null;
+  processing_progress_total?: number | null;
+  processing_progress_label: string;
+  processing_progress_detail?: string | null;
+  processing_mode?: string | null;
 };
 
 export type JobRecord = {
@@ -89,13 +106,30 @@ export type JobRecord = {
   started_at?: string | null;
   completed_at?: string | null;
   parent_job_id?: string | null;
+  stage_label?: string | null;
+  version_label?: string | null;
+  processing_mode?: string | null;
+  progress_percent: number;
+  progress_current?: number | null;
+  progress_total?: number | null;
+  progress_label: string;
+  progress_detail?: string | null;
 };
 
 export type ServiceStatusMap = Record<string, { status: string; detail?: string }>;
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let message = `Request failed: ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: string | { message?: string } };
+      if (typeof payload.detail === "string") {
+        message = payload.detail;
+      } else if (payload.detail && typeof payload.detail.message === "string") {
+        message = payload.detail.message;
+      }
+    } catch {}
+    throw new Error(message);
   }
   return (await response.json()) as T;
 }
@@ -107,6 +141,7 @@ export async function askQuestion({
   topK,
   includeGraph,
   includeSummaries,
+  conversationHistory,
 }: {
   tenantId: string;
   question: string;
@@ -114,6 +149,7 @@ export async function askQuestion({
   topK: number;
   includeGraph: boolean;
   includeSummaries: boolean;
+  conversationHistory?: ConversationTurn[];
 }): Promise<QueryResult> {
   return parseJson<QueryResult>(
     await fetch(`${apiBaseUrl}/api/v1/query`, {
@@ -126,6 +162,7 @@ export async function askQuestion({
         top_k: topK,
         include_graph: includeGraph,
         include_summaries: includeSummaries,
+        conversation_history: conversationHistory ?? [],
       }),
     }),
   );

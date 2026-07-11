@@ -29,7 +29,7 @@ function statusClassName(status?: string | null) {
   if (status === "processed" || status === "completed") {
     return "status-ok";
   }
-  if (status === "processing" || status === "running") {
+  if (status === "queued" || status === "processing" || status === "running") {
     return "status-live";
   }
   return "status-warn";
@@ -44,16 +44,20 @@ const stageLabels: Record<string, string> = {
 };
 
 function progressLabel(document: DocumentRecord) {
-  if (document.status === "processed") {
-    return "Pipeline completed";
-  }
-  if (document.status === "failed") {
-    return "Pipeline failed";
+  if (document.processing_progress_label) {
+    return document.processing_progress_label;
   }
   if (document.current_job_type && document.current_job_status) {
     return `${stageLabels[document.current_job_type] ?? document.current_job_type} | ${document.current_job_status}`;
   }
   return document.status;
+}
+
+function progressDetail(document: DocumentRecord) {
+  if (document.current_job_error_message && document.status === "failed") {
+    return document.current_job_error_message;
+  }
+  return document.processing_progress_detail ?? null;
 }
 
 function hasActiveProcessing(documents: DocumentRecord[]) {
@@ -238,9 +242,32 @@ export function DocumentPanel({ tenantId }: { tenantId: string }) {
                   </div>
                   <div>
                     <span className="meta-label">job status</span>
-                    <div>{document.current_job_status ?? "n/a"}</div>
+                    <div>{document.processing_stage_status ?? document.current_job_status ?? "n/a"}</div>
                   </div>
                 </div>
+
+                <div className="document-progress-stack">
+                  <div className="document-progress-head">
+                    <span className="meta-label">
+                      {document.processing_stage_label ?? "Pipeline"}
+                      {document.processing_mode ? ` | ${document.processing_mode}` : ""}
+                    </span>
+                    <strong>{document.processing_progress_percent}%</strong>
+                  </div>
+                  <div className="progress-track" aria-hidden="true">
+                    <div
+                      className={`progress-fill ${statusClassName(document.processing_stage_status ?? document.status)}`}
+                      style={{ width: `${document.processing_progress_percent}%` }}
+                    />
+                  </div>
+                  {progressDetail(document) ? (
+                    <div className="muted tiny">{progressDetail(document)}</div>
+                  ) : null}
+                </div>
+
+                {document.current_job_error_message && document.status === "failed" ? (
+                  <div className="status-warn">{document.current_job_error_message}</div>
+                ) : null}
 
                 <div className="button-row">
                   <button

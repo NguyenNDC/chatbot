@@ -14,7 +14,13 @@ const stageLabels: Record<string, string> = {
 };
 
 function statusClassName(status: string) {
-  return status === "completed" ? "status-ok" : status === "running" ? "status-live" : "status-warn";
+  if (status === "completed") {
+    return "status-ok";
+  }
+  if (status === "queued" || status === "running") {
+    return "status-live";
+  }
+  return "status-warn";
 }
 
 function hasActiveJobs(jobs: JobRecord[]) {
@@ -76,7 +82,7 @@ export function JobsPanel({ tenantId }: { tenantId: string }) {
             <article className="job-card" key={job.id}>
               <div className="job-card-top">
                 <div>
-                  <strong>{stageLabels[job.job_type] ?? job.job_type}</strong>
+                  <strong>{job.stage_label ?? stageLabels[job.job_type] ?? job.job_type}</strong>
                   <div className="muted">{job.job_type}</div>
                 </div>
                 <div className={statusClassName(job.status)}>{job.status}</div>
@@ -96,9 +102,30 @@ export function JobsPanel({ tenantId }: { tenantId: string }) {
                   <div className="tiny">{job.document_id}</div>
                 </div>
                 <div>
+                  <span className="meta-label">progress</span>
+                  <div>{job.progress_percent}%</div>
+                </div>
+                <div>
                   <span className="meta-label">created</span>
                   <div>{new Date(job.created_at).toLocaleString()}</div>
                 </div>
+              </div>
+
+              <div className="document-progress-stack">
+                <div className="document-progress-head">
+                  <span className="meta-label">
+                    {job.progress_label}
+                    {job.version_label ? ` | ${job.version_label}` : ""}
+                  </span>
+                  <strong>{job.progress_percent}%</strong>
+                </div>
+                <div className="progress-track" aria-hidden="true">
+                  <div
+                    className={`progress-fill ${statusClassName(job.status)}`}
+                    style={{ width: `${job.progress_percent}%` }}
+                  />
+                </div>
+                {job.progress_detail ? <div className="muted tiny">{job.progress_detail}</div> : null}
               </div>
 
               {job.error_message ? <div className="status-warn">{job.error_message}</div> : null}
