@@ -25,6 +25,15 @@ class ServiceSettings(BaseSettings):
     graph_service_url: str = Field(default="http://localhost:8003", alias="GRAPH_SERVICE_URL")
     llm_service_url: str = Field(default="http://localhost:8004", alias="LLM_SERVICE_URL")
     worker_service_url: str = Field(default="http://localhost:8005", alias="WORKER_SERVICE_URL")
+    gateway_service_timeout_seconds: int = Field(
+        default=20, alias="GATEWAY_SERVICE_TIMEOUT_SECONDS"
+    )
+    gateway_query_retrieval_timeout_seconds: int = Field(
+        default=30, alias="GATEWAY_QUERY_RETRIEVAL_TIMEOUT_SECONDS"
+    )
+    gateway_query_llm_timeout_seconds: int = Field(
+        default=180, alias="GATEWAY_QUERY_LLM_TIMEOUT_SECONDS"
+    )
 
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(
@@ -84,6 +93,15 @@ class ServiceSettings(BaseSettings):
     )
     worker_dead_letter_queue: str = Field(
         default="document.dead_letter", alias="WORKER_DEAD_LETTER_QUEUE"
+    )
+    graph_extract_max_concurrency: int = Field(
+        default=6, alias="GRAPH_EXTRACT_MAX_CONCURRENCY"
+    )
+    graph_extract_progress_log_interval: int = Field(
+        default=25, alias="GRAPH_EXTRACT_PROGRESS_LOG_INTERVAL"
+    )
+    graph_extract_commit_interval: int = Field(
+        default=10, alias="GRAPH_EXTRACT_COMMIT_INTERVAL"
     )
     retrieval_graph_hops: int = Field(default=2, alias="RETRIEVAL_GRAPH_HOPS")
     retrieval_graph_candidate_limit: int = Field(

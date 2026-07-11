@@ -26,7 +26,13 @@ function formatBytes(value?: number | null) {
 }
 
 function statusClassName(status?: string | null) {
-  return status === "processed" || status === "completed" ? "status-ok" : "status-warn";
+  if (status === "processed" || status === "completed") {
+    return "status-ok";
+  }
+  if (status === "processing" || status === "running") {
+    return "status-live";
+  }
+  return "status-warn";
 }
 
 const stageLabels: Record<string, string> = {
@@ -38,10 +44,26 @@ const stageLabels: Record<string, string> = {
 };
 
 function progressLabel(document: DocumentRecord) {
+  if (document.status === "processed") {
+    return "Pipeline completed";
+  }
+  if (document.status === "failed") {
+    return "Pipeline failed";
+  }
   if (document.current_job_type && document.current_job_status) {
     return `${stageLabels[document.current_job_type] ?? document.current_job_type} | ${document.current_job_status}`;
   }
   return document.status;
+}
+
+function hasActiveProcessing(documents: DocumentRecord[]) {
+  return documents.some(
+    (document) =>
+      document.status === "queued" ||
+      document.status === "processing" ||
+      document.current_job_status === "queued" ||
+      document.current_job_status === "running",
+  );
 }
 
 type PreviewMode = "raw" | "parsed";
@@ -97,6 +119,18 @@ export function DocumentPanel({ tenantId }: { tenantId: string }) {
     setPreviewDocument(null);
   }, [tenantId]);
 
+  useEffect(() => {
+    if (!tenantId || !hasActiveProcessing(documents)) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      reloadDocuments();
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [documents, tenantId]);
+
   return (
     <>
       <section className="panel">
@@ -111,7 +145,7 @@ export function DocumentPanel({ tenantId }: { tenantId: string }) {
           <div className="button-row compact-row">
             <div className="pill">{documents.length} documents</div>
             <button className="button ghost" type="button" onClick={reloadDocuments}>
-              Lam moi
+              {isPending ? "Dang dong bo..." : "Lam moi"}
             </button>
           </div>
         </div>

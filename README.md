@@ -66,6 +66,9 @@ Bien quan trong nhat can set:
 - `OPENROUTER_MODEL_PRIMARY`
 - `OPENROUTER_MODEL_FALLBACK`
 - `OPENROUTER_MODEL_EXTRACTION`
+- `GRAPH_EXTRACT_MAX_CONCURRENCY`
+
+`GRAPH_EXTRACT_MAX_CONCURRENCY` cho phep `graph.extract` goi LLM song song theo nhieu chunk. Mac dinh la `6`; neu API key/rate limit cho phep va may con du tai, co the nang len `8-12`.
 
 Tenant isolation hien tai duoc scope bang `tenant_id` o API layer. Khi goi cac endpoint documents/jobs/query tu client, can truyen dung tenant dang lam viec.
 

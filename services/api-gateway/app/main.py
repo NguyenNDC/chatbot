@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from enterprise_ai_core.config import get_settings
-from enterprise_ai_core.logging import configure_logging
+from enterprise_ai_core.logging import configure_logging, install_request_logging
 
 from routers import health, orchestration
 
@@ -36,6 +36,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+install_request_logging(app, settings.service_name)
 
 app.include_router(health.router)
 app.include_router(orchestration.router, prefix=settings.api_prefix)

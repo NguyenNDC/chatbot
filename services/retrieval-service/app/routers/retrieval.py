@@ -3,7 +3,7 @@ import re
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from enterprise_ai_core.config import get_settings
@@ -49,7 +49,11 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
     query_terms = normalize_terms(" ".join(subqueries))
     vector_contexts = vector_search(payload, db, subqueries, intent)
     try:
-        graph_contexts = graph_search(payload, query_terms, db, intent) if payload.include_graph else []
+        graph_contexts = (
+            graph_search(payload, query_terms, db, intent)
+            if payload.include_graph and graph_search_available(payload.tenant_id, db)
+            else []
+        )
     except Exception:
         graph_contexts = []
 
@@ -160,6 +164,26 @@ def build_citation(document: Document, version: DocumentVersion, chunk: Document
     )
 
 
+def graph_search_available(tenant_id: str, db: Session) -> bool:
+    processed_count = db.scalar(
+        select(func.count(Document.id)).where(
+            Document.tenant_id == tenant_id,
+            Document.status == "processed",
+        )
+    ) or 0
+    if processed_count <= 0:
+        return False
+
+    with neo4j_client.driver.session() as session:
+        mention_count = session.run(
+            """
+            MATCH ()-[m:MENTIONED_IN]->()
+            RETURN count(m) AS mention_count
+            """
+        ).single()
+    return bool(mention_count and int(mention_count["mention_count"] or 0) > 0)
+
+
 def vector_search(
     payload: QueryRequest,
     db: Session,
@@ -215,7 +239,7 @@ def graph_search(
     MATCH (seed:Entity)
     WHERE seed.tenant_id = $tenant_id
       AND any(
-        term IN $terms WHERE toLower(seed.name) CONTAINS term
+        term IN $terms WHERE toLower(coalesce(seed.name, seed.key, '')) CONTAINS term
         OR any(alias IN coalesce(seed.aliases, []) WHERE toLower(alias) CONTAINS term)
       )
     WITH collect(DISTINCT seed) AS seeds
@@ -224,10 +248,10 @@ def graph_search(
     WITH [item IN collect(DISTINCT seed) + collect(DISTINCT neighbor) WHERE item IS NOT NULL] AS entities
     UNWIND entities AS entity
     WITH DISTINCT entity
-    MATCH (entity)-[m:MENTIONED_IN]->(d:Document)
+    MATCH (entity)-[m:MENTIONED_IN]->(d:Document {{tenant_id: $tenant_id}})
     RETURN d.id AS document_id,
-           collect(DISTINCT entity.name) AS supporting_entities,
-           max(coalesce(m.confidence, 0.5)) AS mention_confidence
+           collect(DISTINCT coalesce(entity.name, entity.key)) AS supporting_entities,
+           max(CASE WHEN m.confidence IS NULL THEN 0.5 ELSE m.confidence END) AS mention_confidence
     LIMIT $limit
     """
     with neo4j_client.driver.session() as session:

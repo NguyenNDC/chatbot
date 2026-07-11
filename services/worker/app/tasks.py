@@ -1,5 +1,4 @@
 import json
-import logging
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
@@ -9,9 +8,10 @@ from enterprise_ai_core.chunking import blocks_to_chunks, chunk_hash
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.db import SessionLocal
 from enterprise_ai_core.embedding import get_embedding_provider
-from enterprise_ai_core.extraction import run_chunk_extraction
+from enterprise_ai_core.extraction import clone_extraction_for_chunk, run_parallel_chunk_extractions
 from enterprise_ai_core.graph_upsert import clear_document_graph, upsert_extraction_payload
 from enterprise_ai_core.graphdb import get_neo4j_client
+from enterprise_ai_core.logging import get_logger
 from enterprise_ai_core.models import (
     ChunkEmbedding,
     ChunkExtraction,
@@ -33,7 +33,7 @@ storage_client = RustFSStorageClient()
 embedding_provider = get_embedding_provider()
 openrouter_client = OpenRouterClient()
 neo4j_client = get_neo4j_client()
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 NEXT_STAGE: dict[str, str | None] = {
     "document.parse": "document.chunk",
@@ -47,6 +47,10 @@ DEAD_LETTER_TASK_NAME = "document.dead_letter"
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class StaleTaskError(Exception):
+    """Raised when a broker task no longer has backing DB state."""
 
 
 def get_target_version(session, document_id: str, job: ProcessingJob) -> DocumentVersion:
@@ -158,6 +162,15 @@ def enqueue_next_stage(
             next_job.celery_task_id = result.id
             session.add(next_job)
             session.commit()
+            logger.info(
+                "next_stage_enqueued",
+                tenant_id=document.tenant_id,
+                document_id=document.id,
+                current_job_id=current_job.id,
+                next_job_id=next_job.id,
+                next_stage=next_stage,
+                queue_name=next_stage,
+            )
         except Exception as exc:
             session.rollback()
             next_job.status = JobStatus.FAILED.value
@@ -284,6 +297,22 @@ def execute_stage_task(
         if next_stage is not None:
             enqueue_next_stage(current_job=job, document=document, next_stage=next_stage)
         return {"job_id": job_id, "document_id": document_id, "tenant_id": tenant_id}
+    except StaleTaskError as exc:
+        logger.warning(
+            "stale_task_skipped",
+            stage_name=stage_name,
+            job_id=job_id,
+            document_id=document_id,
+            tenant_id=tenant_id,
+            reason=str(exc),
+        )
+        return {
+            "job_id": job_id,
+            "document_id": document_id,
+            "tenant_id": tenant_id,
+            "skipped": True,
+            "reason": str(exc),
+        }
     except Exception as exc:
         error_message = str(exc)
         retry_attempt = self.request.retries + 1
@@ -319,7 +348,7 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         job = session.get(ProcessingJob, job_id)
         document = session.get(Document, document_id)
         if not job or not document:
-            raise ValueError(f"Job or document missing for stage {stage_name}")
+            raise StaleTaskError(f"Job or document missing for stage {stage_name}")
 
         version = get_target_version(session, document.id, job)
         job.status = JobStatus.RUNNING.value
@@ -331,6 +360,15 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
         session.add(document)
         session.add(version)
         session.commit()
+        logger.info(
+            "stage_started",
+            stage_name=stage_name,
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            processing_mode=str(job.payload.get("processing_mode", "full")),
+        )
 
         if stage_name == "document.parse":
             handle_parse_stage(session, document, version, job)
@@ -354,11 +392,30 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
             session.add(document)
             session.add(version)
             session.commit()
+            logger.info(
+                "stage_completed",
+                stage_name=stage_name,
+                job_id=job.id,
+                document_id=document.id,
+                tenant_id=document.tenant_id,
+                version_label=version.version_label,
+                document_status=document.status,
+                version_status=version.status,
+            )
             session.expunge(job)
             session.expunge(document)
             return job, document
 
         session.commit()
+        logger.info(
+            "stage_completed",
+            stage_name=stage_name,
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            next_stage=next_stage,
+        )
         session.expunge(job)
         session.expunge(document)
         return job, document
@@ -378,6 +435,14 @@ def run_stage(stage_name: str, job_id: str, document_id: str) -> tuple[Processin
             document.status = DocumentStatus.FAILED.value
             session.add(document)
         session.commit()
+        logger.exception(
+            "stage_failed",
+            stage_name=stage_name,
+            job_id=job_id,
+            document_id=document_id,
+            tenant_id=document.tenant_id if document is not None else None,
+            error_message=str(exc),
+        )
         raise
     finally:
         session.close()
@@ -472,6 +537,20 @@ def handle_parse_stage(
         "parse_quality_score": canonical_document.parse_quality_score,
     }
     session.add(job)
+    logger.info(
+        "parse_completed",
+        stage_name="document.parse",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        block_count=len(canonical_document.blocks),
+        parse_quality_score=canonical_document.parse_quality_score,
+        ocr_required=canonical_document.ocr_required,
+        ocr_applied=canonical_document.ocr_applied,
+        language=canonical_document.language,
+        warning_count=len(canonical_document.parse_warnings),
+    )
 
 
 def handle_chunk_stage(
@@ -620,6 +699,21 @@ def handle_chunk_stage(
         },
     }
     session.add(job)
+    logger.info(
+        "chunk_completed",
+        stage_name="document.chunk",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        processing_mode=processing_mode,
+        chunk_count=len(chunks),
+        new_or_changed=len(changed_chunk_ids),
+        reused=len(reused_chunk_ids),
+        removed=len(obsolete_ids),
+        embedding_targets=len(chunk_ids_requiring_embedding),
+        extraction_targets=len(chunk_ids_requiring_extraction),
+    )
 
 
 def handle_embed_stage(
@@ -632,6 +726,15 @@ def handle_embed_stage(
     if not chunk_ids and str(job.payload.get("processing_mode", "full")) != "full":
         job.payload = {**job.payload, "embedding_count": 0, "embedding_skipped": True}
         session.add(job)
+        logger.info(
+            "embedding_skipped",
+            stage_name="document.embed",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reason="no_chunk_ids_for_incremental_mode",
+        )
         return
 
     statement = (
@@ -645,6 +748,15 @@ def handle_embed_stage(
     if not chunk_rows:
         job.payload = {**job.payload, "embedding_count": 0, "embedding_skipped": True}
         session.add(job)
+        logger.info(
+            "embedding_skipped",
+            stage_name="document.embed",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reason="no_chunk_rows_selected",
+        )
         return
 
     vectors = embedding_provider.embed([chunk.content for chunk in chunk_rows])
@@ -670,6 +782,18 @@ def handle_embed_stage(
         "embedding_provider": embedding_provider.__class__.__name__,
     }
     session.add(job)
+    logger.info(
+        "embedding_completed",
+        stage_name="document.embed",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        embedding_count=len(chunk_rows),
+        embedding_provider=embedding_provider.__class__.__name__,
+        embedding_model=settings.embedding_model_name,
+        embedding_dimension=len(vectors[0]) if vectors else 0,
+    )
 
 
 def handle_graph_extract_stage(
@@ -682,6 +806,15 @@ def handle_graph_extract_stage(
     if not chunk_ids and str(job.payload.get("processing_mode", "full")) != "full":
         job.payload = {**job.payload, "extraction_count": 0, "extraction_skipped": True}
         session.add(job)
+        logger.info(
+            "graph_extract_skipped",
+            stage_name="graph.extract",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reason="no_chunk_ids_for_incremental_mode",
+        )
         return
 
     statement = (
@@ -695,6 +828,15 @@ def handle_graph_extract_stage(
     if not chunk_rows:
         job.payload = {**job.payload, "extraction_count": 0, "extraction_skipped": True}
         session.add(job)
+        logger.info(
+            "graph_extract_skipped",
+            stage_name="graph.extract",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reason="no_chunk_rows_selected",
+        )
         return
 
     extracted_payloads: list[ChunkExtractionPayload] = []
@@ -703,25 +845,83 @@ def handle_graph_extract_stage(
     )
     session.flush()
 
+    chunk_groups: dict[str, list[DocumentChunk]] = {}
     for chunk_row in chunk_rows:
-        extraction = run_chunk_extraction(
-            client=openrouter_client,
-            model_name=settings.openrouter_model_extraction,
-            tenant_id=document.tenant_id,
-            document_id=document.id,
-            chunk_id=chunk_row.id,
-            content=chunk_row.content,
-            section_name=chunk_row.section_name,
-        )
-        extracted_payloads.append(extraction)
-        session.add(
-            ChunkExtraction(
-                document_chunk_id=chunk_row.id,
-                model_name=settings.openrouter_model_extraction,
-                provider="OpenRouter",
-                extraction_json=extraction.model_dump(mode="json"),
+        chunk_groups.setdefault(chunk_row.content_hash, []).append(chunk_row)
+
+    unique_chunk_requests = [
+        {
+            "chunk_id": group[0].id,
+            "content": group[0].content,
+            "section_name": group[0].section_name,
+        }
+        for group in chunk_groups.values()
+    ]
+    progress_interval = max(1, settings.graph_extract_progress_log_interval)
+    commit_interval = max(1, settings.graph_extract_commit_interval)
+    completed_chunk_count = 0
+
+    def log_extract_progress(completed: int, total: int) -> None:
+        if completed == total or completed % progress_interval == 0:
+            logger.info(
+                "graph_extract_progress",
+                stage_name="graph.extract",
+                job_id=job.id,
+                document_id=document.id,
+                tenant_id=document.tenant_id,
+                version_label=version.version_label,
+                completed_unique_chunks=completed,
+                total_unique_chunks=total,
+                total_chunks=len(chunk_rows),
             )
-        )
+
+    def persist_extraction_progress(
+        payload: ChunkExtractionPayload,
+        completed_unique_chunks: int,
+        total_unique_chunks: int,
+    ) -> None:
+        nonlocal completed_chunk_count
+
+        grouped_rows = chunk_groups[payload.document_chunk_id]
+        for chunk_row in grouped_rows:
+            extraction = (
+                payload
+                if chunk_row.id == payload.document_chunk_id
+                else clone_extraction_for_chunk(payload, chunk_id=chunk_row.id)
+            )
+            extracted_payloads.append(extraction)
+            session.add(
+                ChunkExtraction(
+                    document_chunk_id=chunk_row.id,
+                    model_name=settings.openrouter_model_extraction,
+                    provider="OpenRouter",
+                    extraction_json=extraction.model_dump(mode="json"),
+                )
+            )
+        completed_chunk_count += len(grouped_rows)
+        job.payload = {
+            **job.payload,
+            "extraction_completed_unique_chunks": completed_unique_chunks,
+            "extraction_total_unique_chunks": total_unique_chunks,
+            "extraction_completed_chunks": completed_chunk_count,
+            "extraction_total_chunks": len(chunk_rows),
+        }
+        session.add(job)
+        if (
+            completed_unique_chunks == total_unique_chunks
+            or completed_unique_chunks % commit_interval == 0
+        ):
+            session.commit()
+
+    unique_extractions = run_parallel_chunk_extractions(
+        client=openrouter_client,
+        model_name=settings.openrouter_model_extraction,
+        tenant_id=document.tenant_id,
+        document_id=document.id,
+        chunk_requests=unique_chunk_requests,
+        progress_callback=log_extract_progress,
+        result_callback=persist_extraction_progress,
+    )
 
     extraction_object_key = str(
         PurePosixPath(document.tenant_id)
@@ -750,11 +950,26 @@ def handle_graph_extract_stage(
     job.payload = {
         **job.payload,
         "extraction_count": len(extracted_payloads),
+        "extraction_unique_chunk_count": len(unique_chunk_requests),
+        "extraction_reused_chunk_count": len(chunk_rows) - len(unique_chunk_requests),
         "extraction_model": settings.openrouter_model_extraction,
         "extractions_artifact_bucket": stored.bucket_name,
         "extractions_artifact_key": stored.object_key,
     }
     session.add(job)
+    logger.info(
+        "graph_extract_completed",
+        stage_name="graph.extract",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        extraction_count=len(extracted_payloads),
+        unique_chunk_count=len(unique_extractions),
+        reused_chunk_count=len(chunk_rows) - len(unique_chunk_requests),
+        max_concurrency=settings.graph_extract_max_concurrency,
+        extraction_model=settings.openrouter_model_extraction,
+    )
 
 
 def handle_graph_upsert_stage(
@@ -770,6 +985,15 @@ def handle_graph_upsert_stage(
             "graph_sync_skip_reason": "target_version_is_not_current",
         }
         session.add(job)
+        logger.info(
+            "graph_upsert_skipped",
+            stage_name="graph.upsert",
+            job_id=job.id,
+            document_id=document.id,
+            tenant_id=document.tenant_id,
+            version_label=version.version_label,
+            reason="target_version_is_not_current",
+        )
         return
 
     chunk_rows = list(
@@ -813,6 +1037,16 @@ def handle_graph_upsert_stage(
         "graph_version_label": version.version_label,
     }
     session.add(job)
+    logger.info(
+        "graph_upsert_completed",
+        stage_name="graph.upsert",
+        job_id=job.id,
+        document_id=document.id,
+        tenant_id=document.tenant_id,
+        version_label=version.version_label,
+        upserted_extraction_count=len(extraction_rows),
+        graph_backend="neo4j",
+    )
 
 
 @celery_app.task(name="document.parse", bind=True)

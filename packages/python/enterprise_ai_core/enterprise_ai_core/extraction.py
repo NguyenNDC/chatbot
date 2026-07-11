@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import re
+from typing import Callable
 from uuid import uuid4
 
+from .config import get_settings
 from .openrouter import OpenRouterClient
 from .schemas import ChunkExtractionPayload
 
@@ -151,4 +154,70 @@ def run_chunk_extraction(
             "relations": normalized_relations,
         }
     )
+
+
+def clone_extraction_for_chunk(
+    payload: ChunkExtractionPayload,
+    *,
+    chunk_id: str,
+) -> ChunkExtractionPayload:
+    return payload.model_copy(
+        update={
+            "document_chunk_id": chunk_id,
+            "entities": [
+                entity.model_copy(update={"id": entity.id or str(uuid4())})
+                for entity in payload.entities
+            ],
+            "relations": [
+                relation.model_copy(update={"id": relation.id or str(uuid4())})
+                for relation in payload.relations
+            ],
+        }
+    )
+
+
+def run_parallel_chunk_extractions(
+    *,
+    client: OpenRouterClient,
+    model_name: str,
+    tenant_id: str,
+    document_id: str,
+    chunk_requests: list[dict[str, str]],
+    progress_callback: Callable[[int, int], None] | None = None,
+    result_callback: Callable[[ChunkExtractionPayload, int, int], None] | None = None,
+) -> list[ChunkExtractionPayload]:
+    if not chunk_requests:
+        return []
+
+    settings = get_settings()
+    max_workers = max(1, min(settings.graph_extract_max_concurrency, len(chunk_requests)))
+    ordered_results: list[ChunkExtractionPayload | None] = [None] * len(chunk_requests)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(
+                run_chunk_extraction,
+                client=client,
+                model_name=model_name,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                chunk_id=request["chunk_id"],
+                content=request["content"],
+                section_name=request["section_name"],
+            ): index
+            for index, request in enumerate(chunk_requests)
+        }
+
+        completed = 0
+        for future in as_completed(future_map):
+            index = future_map[future]
+            payload = future.result()
+            ordered_results[index] = payload
+            completed += 1
+            if result_callback is not None:
+                result_callback(payload, completed, len(chunk_requests))
+            if progress_callback is not None:
+                progress_callback(completed, len(chunk_requests))
+
+    return [item for item in ordered_results if item is not None]
 

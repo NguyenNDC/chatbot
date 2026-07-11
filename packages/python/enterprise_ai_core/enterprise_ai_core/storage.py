@@ -47,13 +47,25 @@ class RustFSStorageClient:
             Key=object_key,
             Body=payload,
             ContentType=content_type,
-            Metadata=metadata or {},
+            Metadata=self._sanitize_metadata(metadata),
         )
         return StoredObject(
             bucket_name=bucket_name,
             object_key=object_key,
             etag=response.get("ETag"),
         )
+
+    @staticmethod
+    def _sanitize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+        if not metadata:
+            return {}
+
+        sanitized: dict[str, str] = {}
+        for key, value in metadata.items():
+            safe_key = key.encode("ascii", errors="ignore").decode("ascii") or "meta"
+            safe_value = json.dumps(str(value), ensure_ascii=True)[1:-1]
+            sanitized[safe_key] = safe_value
+        return sanitized
 
     def upload_json(
         self,

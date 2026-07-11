@@ -17,6 +17,10 @@ function statusClassName(status: string) {
   return status === "completed" ? "status-ok" : status === "running" ? "status-live" : "status-warn";
 }
 
+function hasActiveJobs(jobs: JobRecord[]) {
+  return jobs.some((job) => job.status === "queued" || job.status === "running");
+}
+
 export function JobsPanel({ tenantId }: { tenantId: string }) {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [isPending, startTransition] = useTransition();
@@ -34,6 +38,18 @@ export function JobsPanel({ tenantId }: { tenantId: string }) {
     reloadJobs();
   }, [tenantId]);
 
+  useEffect(() => {
+    if (!tenantId || !hasActiveJobs(jobs)) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      reloadJobs();
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [jobs, tenantId]);
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -47,7 +63,7 @@ export function JobsPanel({ tenantId }: { tenantId: string }) {
         <div className="button-row compact-row">
           <div className="pill">{isPending ? "Dang tai..." : `${jobs.length} jobs`}</div>
           <button className="button ghost" type="button" onClick={reloadJobs}>
-            Lam moi
+            {isPending ? "Dang dong bo..." : "Lam moi"}
           </button>
         </div>
       </div>

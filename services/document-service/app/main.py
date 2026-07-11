@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from enterprise_ai_core.config import get_settings
 from enterprise_ai_core.db import init_db
-from enterprise_ai_core.logging import configure_logging
+from enterprise_ai_core.logging import configure_logging, install_request_logging
 from enterprise_ai_core.storage import RustFSStorageClient
 
 from routers import documents, health, tenants
@@ -29,6 +29,9 @@ app = FastAPI(
     openapi_url=f"{settings.api_prefix}/openapi.json",
     docs_url="/docs",
 )
+
+install_request_logging(app, settings.service_name)
+
 app.include_router(health.router)
 app.include_router(tenants.router, prefix=settings.api_prefix)
 app.include_router(documents.router, prefix=settings.api_prefix)
