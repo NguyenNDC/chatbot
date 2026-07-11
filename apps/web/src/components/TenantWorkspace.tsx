@@ -23,9 +23,12 @@ export function TenantWorkspace({
             Tenants
           </button>
           <div className="label">Tenant workspace</div>
-          <h1 className="mt-1 text-2xl font-bold tracking-normal">{tenantId}</h1>
+          <h1 className="mt-1 text-2xl font-bold tracking-normal">
+            {tenantId}
+          </h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-            Upload tai lieu, theo doi RAG pipeline va chat truc tiep voi kho tri thuc cua tenant trong cung mot man hinh.
+            Upload tai lieu, theo doi RAG pipeline va chat truc tiep voi kho tri
+            thuc cua tenant trong cung mot man hinh.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -40,8 +43,12 @@ export function TenantWorkspace({
         </div>
       </section>
 
-      <section className="grid gap-5 2xl:grid-cols-[minmax(0,0.96fr)_minmax(620px,1.04fr)]">
-        <DocumentPanel tenantId={tenantId} documents={documents} onDocumentsChange={setDocuments} />
+      <section className="grid gap-5 grid-cols-2">
+        <DocumentPanel
+          tenantId={tenantId}
+          documents={documents}
+          onDocumentsChange={setDocuments}
+        />
         <ChatPanel tenantId={tenantId} documents={documents} />
       </section>
     </div>

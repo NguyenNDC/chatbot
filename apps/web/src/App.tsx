@@ -100,17 +100,25 @@ export default function App() {
               <Database className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-bold leading-5">Enterprise Graph RAG</div>
+              <div className="text-sm font-bold leading-5">
+                Enterprise Graph RAG
+              </div>
               <div className="text-xs text-slate-500">{activeLabel}</div>
             </div>
           </button>
 
           <nav className="hidden items-center gap-1 md:flex">
-            <NavButton active={route.name === "dashboard"} onClick={() => navigate({ name: "dashboard" })}>
+            <NavButton
+              active={route.name === "dashboard"}
+              onClick={() => navigate({ name: "dashboard" })}
+            >
               <LayoutDashboard className="h-4 w-4" />
               Dashboard
             </NavButton>
-            <NavButton active={route.name !== "dashboard"} onClick={() => navigate({ name: "tenants" })}>
+            <NavButton
+              active={route.name !== "dashboard"}
+              onClick={() => navigate({ name: "tenants" })}
+            >
               <Building2 className="h-4 w-4" />
               Tenants
             </NavButton>
@@ -124,7 +132,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1540px] px-5 py-5">
+      <main className="mx-auto px-5 py-5">
         {route.name === "dashboard" ? (
           <Dashboard />
         ) : route.name === "tenant" ? (
@@ -133,7 +141,9 @@ export default function App() {
             onBack={() => navigate({ name: "tenants" })}
           />
         ) : (
-          <TenantManager onOpenTenant={(tenantId) => navigate({ name: "tenant", tenantId })} />
+          <TenantManager
+            onOpenTenant={(tenantId) => navigate({ name: "tenant", tenantId })}
+          />
         )}
       </main>
 
