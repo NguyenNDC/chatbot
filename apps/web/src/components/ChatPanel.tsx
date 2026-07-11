@@ -72,6 +72,9 @@ function answerLabel(answerType?: string | null) {
     no_answer: "Khong du bang chung",
     refusal: "Tu choi",
     clarification: "Can lam ro",
+    chitchat: "Tro chuyen",
+    help: "Huong dan",
+    unsupported: "Ngoai pham vi",
     pending: "Dang xu ly",
     failed: "Loi",
   };

@@ -1,3 +1,5 @@
+import re
+import unicodedata
 from uuid import uuid4
 
 import httpx
@@ -50,6 +52,236 @@ REFERENTIAL_MARKERS = (
 )
 
 CHAT_HISTORY_LIMIT = 12
+
+GREETING_PATTERNS = {
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "hi",
+    "hello",
+    "hey",
+    "xin chao",
+    "chao",
+    "chao ban",
+    "alo",
+    "ban khoe khong",
+    "khoe khong",
+}
+THANKS_PATTERNS = {
+    "cam on",
+    "cam on ban",
+    "cam on nhe",
+    "cam on nhieu",
+    "thank",
+    "thanks",
+    "thank you",
+    "ok cam on",
+    "oke cam on",
+}
+GOODBYE_PATTERNS = {
+    "tam biet",
+    "bye",
+    "goodbye",
+    "hen gap lai",
+}
+ACK_PATTERNS = {
+    "ok",
+    "okay",
+    "oke",
+    "okey",
+    "uh",
+    "u",
+    "um",
+    "vang",
+    "da",
+    "duoc",
+    "roi",
+    "da hieu",
+    "hieu roi",
+    "dung roi",
+    "chuan roi",
+}
+HELP_PATTERNS = {
+    "help",
+    "tro giup",
+    "huong dan",
+    "huong dan su dung",
+    "toi co the hoi gi",
+    "co the hoi gi",
+    "ban giup duoc gi",
+}
+BOT_IDENTITY_PATTERNS = {
+    "ban la ai",
+    "may la ai",
+    "ten ban la gi",
+    "chatbot nay la gi",
+    "ban lam duoc gi",
+    "gioi thieu ban",
+}
+AMBIGUOUS_FOLLOWUP_PATTERNS = {
+    "cai do la gi",
+    "cai nay la gi",
+    "noi ro hon",
+    "giai thich them",
+    "phan tich them",
+    "vi du",
+    "tiep di",
+    "ke tiep",
+}
+UNSUPPORTED_PATTERNS = {
+    "du bao thoi tiet",
+    "thoi tiet",
+    "tin tuc",
+    "gia vang",
+    "gia do la",
+    "chung khoan",
+    "bong da",
+    "dat ve",
+    "mua hang",
+    "nau an",
+    "viet tho",
+    "ke chuyen cuoi",
+    "tao anh",
+    "ve anh",
+    "viet code",
+    "dich bai hat",
+    "bai hat",
+    "choi game",
+}
+KNOWLEDGE_MARKERS = {
+    "tai lieu",
+    "van ban",
+    "nghi dinh",
+    "thong tu",
+    "quyet dinh",
+    "luat",
+    "dieu",
+    "khoan",
+    "chuong",
+    "quy dinh",
+    "nghia vu",
+    "trach nhiem",
+    "thu tuc",
+    "quy trinh",
+    "tom tat",
+    "so sanh",
+    "hieu luc",
+    "can cu",
+    "nguon",
+    "trich",
+    "trang",
+}
+
+
+def normalize_chat_text(message: str) -> str:
+    normalized = unicodedata.normalize("NFD", message.lower()).replace("đ", "d")
+    without_marks = "".join(
+        char for char in normalized if unicodedata.category(char) != "Mn"
+    )
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", without_marks).split())
+
+
+def token_count(normalized_message: str) -> int:
+    return len([token for token in normalized_message.split() if token])
+
+
+def contains_any(normalized_message: str, patterns: set[str]) -> bool:
+    padded = f" {normalized_message} "
+    return any(f" {pattern} " in padded for pattern in patterns)
+
+
+def is_exact_or_short_match(normalized_message: str, patterns: set[str], max_tokens: int = 7) -> bool:
+    return normalized_message in patterns or (
+        token_count(normalized_message) <= max_tokens and contains_any(normalized_message, patterns)
+    )
+
+
+def has_knowledge_signal(normalized_message: str) -> bool:
+    return contains_any(normalized_message, KNOWLEDGE_MARKERS)
+
+
+def classify_chat_intent(message: str, conversation_history: list[ConversationTurn]) -> str:
+    normalized = normalize_chat_text(message)
+    if not normalized:
+        return "empty"
+
+    if contains_any(normalized, UNSUPPORTED_PATTERNS):
+        return "unsupported"
+    if has_knowledge_signal(normalized) and token_count(normalized) > 4:
+        return "knowledge_query"
+    if is_exact_or_short_match(normalized, GREETING_PATTERNS, max_tokens=5):
+        return "greeting"
+    if is_exact_or_short_match(normalized, THANKS_PATTERNS, max_tokens=6):
+        return "thanks"
+    if is_exact_or_short_match(normalized, GOODBYE_PATTERNS, max_tokens=6):
+        return "goodbye"
+    if is_exact_or_short_match(normalized, ACK_PATTERNS, max_tokens=4):
+        return "ack"
+    if is_exact_or_short_match(normalized, HELP_PATTERNS, max_tokens=9):
+        return "help"
+    if is_exact_or_short_match(normalized, BOT_IDENTITY_PATTERNS, max_tokens=8):
+        return "bot_identity"
+    if is_exact_or_short_match(normalized, AMBIGUOUS_FOLLOWUP_PATTERNS, max_tokens=7):
+        has_previous_answer = any(turn.role == "assistant" for turn in conversation_history)
+        return "knowledge_query" if has_previous_answer else "clarification"
+    if has_knowledge_signal(normalized):
+        return "knowledge_query"
+    if token_count(normalized) <= 2:
+        return "clarification"
+    return "knowledge_query"
+
+
+def direct_chat_reply(intent: str, tenant_id: str) -> tuple[str, str, list[str]] | None:
+    replies = {
+        "empty": (
+            "Mình chưa thấy nội dung câu hỏi. Bạn nhập lại giúp mình nhé.",
+            "clarification",
+            ["direct-intent", "empty-message"],
+        ),
+        "greeting": (
+            "Xin chào! Mình là trợ lý hỏi đáp theo kho tài liệu của tenant này. "
+            "Bạn có thể hỏi mình về nội dung tài liệu, chương, điều, trang, quy trình, nghĩa vụ hoặc yêu cầu tóm tắt có nguồn tham chiếu.",
+            "chitchat",
+            ["direct-intent", "greeting"],
+        ),
+        "thanks": (
+            "Rất vui được hỗ trợ bạn. Nếu cần, bạn cứ hỏi tiếp về nội dung trong kho tài liệu hoặc yêu cầu mình chỉ rõ nguồn theo tài liệu, chương, điều và trang.",
+            "chitchat",
+            ["direct-intent", "thanks"],
+        ),
+        "goodbye": (
+            "Tạm biệt! Khi cần tra cứu hoặc kiểm chứng thông tin trong tài liệu, bạn cứ quay lại hỏi mình nhé.",
+            "chitchat",
+            ["direct-intent", "goodbye"],
+        ),
+        "ack": (
+            "Mình sẵn sàng hỗ trợ tiếp. Bạn có thể hỏi thêm về tài liệu, yêu cầu tóm tắt, so sánh hoặc trích nguồn cụ thể.",
+            "chitchat",
+            ["direct-intent", "ack"],
+        ),
+        "help": (
+            "Bạn có thể hỏi mình các việc như: tóm tắt tài liệu, tìm điều khoản liên quan, so sánh quy định, kiểm tra hiệu lực, lập checklist theo tài liệu, "
+            "hoặc yêu cầu trích rõ nguồn theo tài liệu/chương/điều/trang.",
+            "help",
+            ["direct-intent", "help"],
+        ),
+        "bot_identity": (
+            f"Mình là chatbot RAG cho tenant '{tenant_id}'. Mình trả lời dựa trên kho tài liệu đã upload, ưu tiên câu trả lời có căn cứ và nguồn tham chiếu rõ ràng.",
+            "help",
+            ["direct-intent", "bot-identity"],
+        ),
+        "clarification": (
+            "Bạn nói rõ hơn giúp mình câu hỏi hoặc tài liệu muốn tra cứu nhé. Ví dụ: “Tóm tắt Điều 8 Luật Thủ đô” hoặc “Quy định về xây dựng văn bản thi hành là gì?”.",
+            "clarification",
+            ["direct-intent", "needs-clarification"],
+        ),
+        "unsupported": (
+            "Mình được thiết kế để hỏi đáp theo kho tài liệu của tenant. Yêu cầu này có vẻ nằm ngoài phạm vi đó; bạn có thể chuyển thành câu hỏi liên quan đến tài liệu để mình hỗ trợ chính xác hơn.",
+            "unsupported",
+            ["direct-intent", "out-of-scope"],
+        ),
+    }
+    return replies.get(intent)
 
 
 def build_retrieval_question(payload: QueryRequest) -> str:
@@ -447,6 +679,27 @@ async def send_chat_message(
             content=payload.message,
         ),
     )
+
+    intent = classify_chat_intent(payload.message, conversation_history)
+    direct_reply = direct_chat_reply(intent, payload.tenant_id)
+    if direct_reply is not None:
+        content, answer_type, policy_summary = direct_reply
+        assistant_message = await append_chat_message_document_service(
+            session_id,
+            ChatMessageCreateRequest(
+                tenant_id=payload.tenant_id,
+                role="assistant",
+                content=content,
+                answer_type=answer_type,
+                policy_summary=policy_summary,
+            ),
+        )
+        updated_session = await get_chat_session_document_service(session.id, payload.tenant_id)
+        return ChatSendMessageResponse(
+            session=updated_session,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
 
     try:
         query_response = await run_query_pipeline(
