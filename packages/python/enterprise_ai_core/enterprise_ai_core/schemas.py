@@ -299,6 +299,10 @@ class Citation(BaseModel):
     page: int | None = None
     chunk_id: str
     block_id: str | None = None
+    document_label: str | None = None
+    chapter: str | None = None
+    article: str | None = None
+    source_label: str | None = None
 
 
 class RetrievalChunk(BaseModel):

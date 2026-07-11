@@ -100,7 +100,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             clarification_question=build_clarification_question(payload.question),
         )
 
-    citation_map = {item.chunk_id: item.source for item in selected_contexts}
+    citation_map = build_citation_map(selected_contexts)
     messages = build_answer_messages(
         payload.question,
         selected_contexts,
@@ -136,12 +136,14 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             policy_summary=fallback["policy_summary"],
         )
 
+    disposition = parse_disposition(answer_payload.get("answer_type"))
+    raw_answer_text = normalize_answer_text(answer_payload)
     citation_ids = [
         item for item in normalize_string_list(answer_payload.get("citations")) if item in citation_map
     ]
-    citations = [citation_map[item] for item in citation_ids]
-    disposition = parse_disposition(answer_payload.get("answer_type"))
-    answer_text = normalize_answer_text(answer_payload)
+    citation_ids.extend(extract_context_reference_ids(raw_answer_text))
+    citations = [citation_map[item] for item in dedupe_strings(citation_ids) if item in citation_map]
+    answer_text = strip_internal_citation_ids(raw_answer_text)
 
     if disposition in {AnswerDisposition.GROUNDED, AnswerDisposition.PARTIAL} and not citations:
         citations = [selected_contexts[0].source]
@@ -196,6 +198,23 @@ def select_contexts(contexts: list[RetrievalChunk]) -> list[RetrievalChunk]:
             break
 
     return selected or ranked[:1]
+
+
+def build_citation_map(contexts: list[RetrievalChunk]) -> dict[str, Citation]:
+    citation_map: dict[str, Citation] = {}
+    for index, context in enumerate(contexts, start=1):
+        keys = {
+            context.chunk_id,
+            f"Context {index}",
+            f"context {index}",
+            f"[Context {index}]",
+            f"[context {index}]",
+            f"context_{index}",
+            f"context-{index}",
+        }
+        for key in keys:
+            citation_map[key] = context.source
+    return citation_map
 
 
 def needs_clarification(payload: GenerateAnswerRequest, contexts: list[RetrievalChunk]) -> bool:
@@ -254,6 +273,34 @@ def fallback_text_for(disposition: AnswerDisposition) -> str:
     if disposition == AnswerDisposition.CLARIFICATION:
         return CLARIFICATION_TEMPLATE
     return "Mình chưa tạo được câu trả lời đủ tin cậy từ các tài liệu đã truy xuất."
+
+
+def strip_internal_citation_ids(text: str) -> str:
+    without_uuid_refs = re.sub(
+        r"\s*\[[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\]",
+        "",
+        text,
+    )
+    without_context_refs = re.sub(
+        r"\s*[\[(]?\s*Context\s+\d+\s*[\])]?",
+        "",
+        without_uuid_refs,
+        flags=re.IGNORECASE,
+    )
+    without_chunk_labels = re.sub(
+        r"\s*\(?(?:chunk|source|citation)[ _-]?[iI][dD]\s*[:#]?\s*[0-9a-fA-F-]{16,}\)?",
+        "",
+        without_context_refs,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[ \t]+\n", "\n", without_chunk_labels).strip()
+
+
+def extract_context_reference_ids(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r"Context\s+(\d+)", text, flags=re.IGNORECASE):
+        refs.append(f"Context {match.group(1)}")
+    return refs
 
 
 def normalize_model_answer_payload(content: object, raw_text: object = None) -> dict | None:

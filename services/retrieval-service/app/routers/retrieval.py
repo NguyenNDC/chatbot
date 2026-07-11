@@ -151,17 +151,202 @@ def build_version_filters(payload: QueryRequest) -> list:
     return filters
 
 
-def build_citation(document: Document, version: DocumentVersion, chunk: DocumentChunk) -> Citation:
+def build_citation(
+    db: Session,
+    document: Document,
+    version: DocumentVersion,
+    chunk: DocumentChunk,
+) -> Citation:
+    provenance = find_section_provenance(db, chunk)
+    document_label = infer_document_label(db, document, version)
+    chapter = infer_chapter_label(chunk) or provenance["chapter"]
+    article = infer_article_label(chunk) or provenance["article"]
+    source_page = chunk.page_start or provenance["page"]
+    section = infer_section_label(chunk, chapter, article)
+    source_label = build_source_label(document_label, chapter, article, section, source_page)
     return Citation(
         document_id=document.id,
         document_version_id=version.id,
         title=document.title,
-        section=chunk.section_name,
+        section=section,
         section_path=chunk.heading_path,
-        page=chunk.page_start,
+        page=source_page,
         chunk_id=chunk.id,
         block_id=chunk.chunk_metadata.get("source_block_id"),
+        document_label=document_label,
+        chapter=chapter,
+        article=article,
+        source_label=source_label,
     )
+
+
+def find_section_provenance(db: Session, chunk: DocumentChunk) -> dict[str, str | int | None]:
+    rows = list(
+        db.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.document_id == chunk.document_id,
+                DocumentChunk.document_version_id == chunk.document_version_id,
+                DocumentChunk.chunk_index <= chunk.chunk_index,
+            )
+            .order_by(DocumentChunk.chunk_index.desc())
+            .limit(80)
+        ).all()
+    )
+    chapter: str | None = None
+    article: str | None = None
+    page: int | None = None
+    for candidate in rows:
+        if article is None:
+            article = infer_article_label(candidate)
+            if article:
+                page = candidate.page_start
+        if chapter is None:
+            chapter = infer_chapter_label(candidate)
+        if article and chapter:
+            break
+    return {"chapter": chapter, "article": article, "page": page}
+
+
+def infer_document_label(db: Session, document: Document, version: DocumentVersion) -> str:
+    rows = list(
+        db.scalars(
+            select(DocumentChunk)
+            .where(
+                DocumentChunk.document_id == document.id,
+                DocumentChunk.document_version_id == version.id,
+            )
+            .order_by(DocumentChunk.chunk_index.asc())
+            .limit(30)
+        ).all()
+    )
+    header_text = "\n".join(chunk.content[:500] for chunk in rows)
+    patterns = [
+        r"(NGHỊ\s+ĐỊNH|NGHI\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
+        r"(LUẬT|LUAT)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
+        r"(THÔNG\s+TƯ|THONG\s+TU)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
+        r"(QUYẾT\s+ĐỊNH|QUYET\s+DINH)\s+(?:SỐ\s*)?([0-9/]+/[A-Z0-9Đ-]+)?[^\n]{0,120}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, header_text, flags=re.IGNORECASE)
+        if match:
+            label = " ".join(match.group(0).split()).strip(" -–—.")
+            if 4 <= len(label) <= 180:
+                return normalize_legal_label(label)
+    return document.title
+
+
+def normalize_legal_label(label: str) -> str:
+    replacements = {
+        "NGHI DINH": "NGHỊ ĐỊNH",
+        "LUAT": "LUẬT",
+        "THONG TU": "THÔNG TƯ",
+        "QUYET DINH": "QUYẾT ĐỊNH",
+    }
+    normalized = label
+    for raw, corrected in replacements.items():
+        normalized = re.sub(raw, corrected, normalized, flags=re.IGNORECASE)
+    return normalized
+
+
+def infer_chapter_label(chunk: DocumentChunk) -> str | None:
+    heading_candidates = [
+        *[str(item) for item in chunk.heading_path or []],
+        chunk.section_name or "",
+    ]
+    for candidate in heading_candidates:
+        match = re.search(
+            r"\b(Chương|Chuong)\s+([IVXLCDM]+|\d+)\.?\s*([^\n.;:]{0,140})",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            return format_chapter_match(match)
+
+    match = re.search(
+        r"(?:^|\n)\s*(Chương|Chuong)\s+([IVXLCDM]+|\d+)\.?\s*([^\n.;:]{0,140})",
+        chunk.content[:800],
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return format_chapter_match(match)
+    return None
+
+
+def format_chapter_match(match: re.Match) -> str:
+    number = match.group(2)
+    title = " ".join((match.group(3) or "").split()).strip(" -–—.")
+    return f"Chương {number}{('. ' + title) if title else ''}"
+
+
+def infer_article_label(chunk: DocumentChunk) -> str | None:
+    heading_candidates = [
+        *[str(item) for item in chunk.heading_path or []],
+        chunk.section_name or "",
+    ]
+    for candidate in heading_candidates:
+        match = re.search(
+            r"\b(Điều|Dieu)\s+(\d+[a-zA-Z]?)\.?\s*([^\n.;:]{0,120})",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        return format_article_match(match)
+
+    match = re.search(
+        r"(?:^|\n)\s*(Điều|Dieu)\s+(\d+[a-zA-Z]?)\.?\s*([^\n.;:]{0,120})",
+        chunk.content[:800],
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return format_article_match(match)
+    return None
+
+
+def format_article_match(match: re.Match) -> str:
+    prefix = "Điều"
+    number = match.group(2)
+    title = " ".join((match.group(3) or "").split()).strip(" -–—.")
+    return f"{prefix} {number}{('. ' + title) if title else ''}"
+
+
+def infer_section_label(
+    chunk: DocumentChunk,
+    chapter: str | None,
+    article: str | None,
+) -> str:
+    if article:
+        return article
+    if chapter:
+        return chapter
+    heading_path = [str(item).strip() for item in chunk.heading_path or [] if str(item).strip()]
+    if heading_path:
+        return " > ".join(heading_path[-2:])
+    section_name = (chunk.section_name or "").strip()
+    if section_name and section_name.lower() not in {"paragraph", "body"}:
+        return section_name
+    if chunk.page_start is not None:
+        return f"Trang {chunk.page_start}"
+    return "Không rõ chương/điều"
+
+
+def build_source_label(
+    document_label: str,
+    chapter: str | None,
+    article: str | None,
+    section: str,
+    page: int | None,
+) -> str:
+    parts = [document_label]
+    if chapter:
+        parts.append(chapter)
+    if article and article != chapter:
+        parts.append(article)
+    if not chapter and not article:
+        parts.append(section)
+    parts.append(f"trang {page}" if page is not None else "không rõ trang")
+    return " - ".join(part for part in parts if part)
 
 
 def graph_search_available(tenant_id: str, db: Session) -> bool:
@@ -215,7 +400,7 @@ def vector_search(
                 chunk_id=chunk.id,
                 score=score,
                 content=chunk.content,
-                source=build_citation(document, version, chunk),
+                source=build_citation(db, document, version, chunk),
                 retrieval_source="vector",
                 vector_score=score,
                 final_score=score,
@@ -311,7 +496,7 @@ def graph_search(
             chunk_id=chunk.id,
             score=graph_score,
             content=chunk.content,
-            source=build_citation(document, version, chunk),
+            source=build_citation(db, document, version, chunk),
             retrieval_source="graph",
             graph_score=graph_score,
             final_score=graph_score,
@@ -430,7 +615,7 @@ def lexical_fallback(
             chunk_id=chunk.id,
             score=score_term_overlap(query_terms, chunk.content) or 0.5,
             content=chunk.content,
-            source=build_citation(document, version, chunk),
+            source=build_citation(db, document, version, chunk),
             retrieval_source="lexical",
             final_score=score_term_overlap(query_terms, chunk.content) or 0.5,
             query_path=["lexical-fallback"],

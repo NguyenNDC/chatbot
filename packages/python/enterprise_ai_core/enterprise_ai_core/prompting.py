@@ -27,7 +27,7 @@ Template:
 - direct answer first
 - key supporting points next
 - mention uncertainty or conflict when present
-- cite chunk ids only when supported
+- do not show chunk IDs, UUIDs, trace IDs, Context labels, or internal metadata in the user-facing answer
 """.strip()
 
 OUTPUT_INSTRUCTION = """
@@ -41,6 +41,8 @@ Return exactly one JSON object that follows this shape:
   "refusal_reason": null
 }
 The "answer" field must be a readable chatbot response, not an API object.
+Do not put chunk IDs/UUIDs in "answer"; put supporting chunk IDs only in the "citations" array.
+Do not write "[Context 1]" or similar labels in "answer". If you need to mention a source naturally, use the human source label.
 """.strip()
 
 NO_ANSWER_TEMPLATE = (
@@ -98,12 +100,13 @@ def render_context_block(contexts: list[RetrievalChunk]) -> str:
         sections.append(
             "\n".join(
                 [
-                    f"[Context {index}]",
+                    f"[Context {index} - internal label, do not show this label to the user]",
                     f"Chunk ID: {context.chunk_id}",
                     f"Document ID: {context.source.document_id}",
                     f"Document Version: {context.source.document_version_id or 'unknown'}",
                     f"Title: {context.source.title}",
                     f"Section: {context.source.section}",
+                    f"Human source label: {context.source.source_label or context.source.section}",
                     f"Section Path: {' > '.join(context.source.section_path) if context.source.section_path else 'n/a'}",
                     f"Page: {context.source.page or 'n/a'}",
                     f"Retrieval source: {context.retrieval_source}",

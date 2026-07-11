@@ -105,6 +105,35 @@ function readableMessageContent(content: string) {
   return content;
 }
 
+function citationLabel(citation: {
+  title: string;
+  section?: string | null;
+  page?: number | null;
+  document_label?: string | null;
+  chapter?: string | null;
+  article?: string | null;
+  source_label?: string | null;
+}) {
+  if (citation.source_label?.trim()) {
+    return citation.source_label.trim();
+  }
+  const documentLabel = citation.document_label || citation.title;
+  const location = [citation.chapter, citation.article || citation.section].filter(Boolean).join(" - ") || "Không rõ chương/điều";
+  const page = citation.page ? `trang ${citation.page}` : "không rõ trang";
+  return `${documentLabel} - ${location} - ${page}`;
+}
+
+function citationLocation(citation: {
+  section?: string | null;
+  page?: number | null;
+  chapter?: string | null;
+  article?: string | null;
+}) {
+  const location = [citation.chapter, citation.article || citation.section].filter(Boolean).join(" · ") || "Không rõ chương/điều";
+  const page = citation.page ? `Trang ${citation.page}` : "Không rõ trang";
+  return `${location} · ${page}`;
+}
+
 function knowledgeStatus(documents: DocumentRecord[]) {
   const ready = documents.filter((document) => document.status === "processed").length;
   const active = documents.filter(
@@ -409,32 +438,24 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                         )}
                       >
                         <div className="whitespace-pre-wrap">{message.pending ? "Dang soan cau tra loi..." : readableMessageContent(message.content)}</div>
-                        {message.answer_type ? <span className="badge-neutral w-fit">{answerLabel(message.answer_type)}</span> : null}
-                        {message.policy_summary.length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5">
-                            {message.policy_summary.map((item) => (
-                              <span className="rounded bg-slate-100 px-1.5 py-1 text-xs text-slate-600" key={`${message.id}-${item}`}>
-                                {item}
-                              </span>
-                            ))}
-                          </div>
-                        ) : null}
+                        {message.answer_type && message.answer_type !== "grounded" ? <span className="badge-neutral w-fit">{answerLabel(message.answer_type)}</span> : null}
                         {message.citations.length > 0 ? (
                           <div className="grid gap-2">
-                            <div className="text-xs font-bold uppercase tracking-normal text-slate-500">Nguon tham chieu</div>
+                            <div className="text-xs font-bold uppercase tracking-normal text-slate-500">Nguồn tham chiếu</div>
                             <div className="flex flex-wrap gap-2">
                               {message.citations.map((citation) => (
                                 <a
-                                  className="flex max-w-56 items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs leading-5 text-slate-700 hover:border-ocean-200 hover:bg-white"
+                                  className="flex max-w-80 items-start gap-2 rounded-md border border-slate-200 bg-slate-50 p-2 text-xs leading-5 text-slate-700 hover:border-ocean-200 hover:bg-white"
                                   href={rawDocumentPreviewUrl(citation.document_id, tenantId)}
                                   key={`${message.id}-${citation.chunk_id}`}
                                   rel="noreferrer"
                                   target="_blank"
+                                  title={citationLabel(citation)}
                                 >
                                   <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ocean-600" />
                                   <span className="min-w-0">
-                                    <strong className="block truncate">{citation.title}</strong>
-                                    <span className="block truncate">{citation.section || "unknown section"}</span>
+                                    <strong className="block truncate">{citation.document_label || citation.title}</strong>
+                                    <span className="block truncate">{citationLocation(citation)}</span>
                                   </span>
                                 </a>
                               ))}
@@ -448,9 +469,10 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                               {message.contexts.slice(0, 4).map((context) => (
                                 <div className="rounded-md bg-white p-3 text-xs leading-5 text-slate-600" key={`${message.id}-${context.chunk_id}`}>
                                   <div className="mb-1 flex items-center justify-between gap-2">
-                                    <strong className="truncate text-slate-800">{context.source.title}</strong>
+                                    <strong className="truncate text-slate-800">{context.source.document_label || context.source.title}</strong>
                                     <span>{context.final_score?.toFixed(3) ?? context.score.toFixed(3)}</span>
                                   </div>
+                                  <div className="mb-1 text-slate-500">{citationLocation(context.source)}</div>
                                   {context.content.slice(0, 260)}...
                                 </div>
                               ))}

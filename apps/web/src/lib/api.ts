@@ -16,8 +16,14 @@ export type Citation = {
   document_version_id?: string | null;
   title: string;
   section: string;
+  section_path?: string[];
   page?: number | null;
   chunk_id: string;
+  block_id?: string | null;
+  document_label?: string | null;
+  chapter?: string | null;
+  article?: string | null;
+  source_label?: string | null;
 };
 
 export type RetrievalContext = {
