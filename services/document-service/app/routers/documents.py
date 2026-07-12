@@ -27,6 +27,8 @@ from enterprise_ai_core.models import (
 from enterprise_ai_core.progress import build_document_progress_snapshot, build_job_progress_snapshot
 from enterprise_ai_core.queue import get_celery_app
 from enterprise_ai_core.schemas import (
+    DocumentChunkPreviewItem,
+    DocumentChunkPreviewResponse,
     DocumentDeleteResponse,
     DocumentItem,
     DocumentListResponse,
@@ -821,4 +823,56 @@ async def preview_parsed_document(
         parse_quality_score=float(parsed.get("parse_quality_score", 0.0) or 0.0),
         parse_warnings=list(parsed.get("parse_warnings", [])),
         plain_text=str(parsed.get("plain_text", "")),
+    )
+
+
+@router.get("/documents/{document_id}/preview/chunks", response_model=DocumentChunkPreviewResponse)
+async def preview_document_chunks(
+    document_id: str,
+    tenant_id: str = Query(...),
+    db: Session = Depends(get_db_session),
+) -> DocumentChunkPreviewResponse:
+    document = get_document_for_tenant(db, document_id, tenant_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    version = current_version_for_document(db, document.id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Document version not found")
+
+    chunk_rows = list(
+        db.scalars(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_version_id == version.id)
+            .order_by(DocumentChunk.chunk_index.asc())
+        ).all()
+    )
+    if not chunk_rows:
+        raise HTTPException(status_code=404, detail="Chunk preview not available yet")
+
+    return DocumentChunkPreviewResponse(
+        document_id=document.id,
+        document_version_id=version.id,
+        version_label=version.version_label,
+        title=document.title,
+        chunk_target_tokens=settings.chunk_target_tokens,
+        chunk_overlap_tokens=settings.chunk_overlap_tokens,
+        total_chunks=len(chunk_rows),
+        items=[
+            DocumentChunkPreviewItem(
+                chunk_id=chunk.id,
+                chunk_index=chunk.chunk_index,
+                section_name=chunk.section_name,
+                heading_path=chunk.heading_path,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                source_offset_start=chunk.source_offset_start,
+                source_offset_end=chunk.source_offset_end,
+                token_estimate=chunk.token_estimate,
+                parse_quality_score=chunk.parse_quality_score,
+                content=chunk.content,
+                metadata=chunk.chunk_metadata,
+            )
+            for chunk in chunk_rows
+        ],
     )

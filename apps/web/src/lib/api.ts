@@ -49,6 +49,32 @@ export type ParsedPreview = {
   plain_text: string;
 };
 
+export type DocumentChunkPreviewItem = {
+  chunk_id: string;
+  chunk_index: number;
+  section_name: string;
+  heading_path: string[];
+  page_start?: number | null;
+  page_end?: number | null;
+  source_offset_start?: number | null;
+  source_offset_end?: number | null;
+  token_estimate: number;
+  parse_quality_score?: number | null;
+  content: string;
+  metadata: Record<string, unknown>;
+};
+
+export type DocumentChunkPreview = {
+  document_id: string;
+  document_version_id: string;
+  version_label: string;
+  title: string;
+  chunk_target_tokens: number;
+  chunk_overlap_tokens: number;
+  total_chunks: number;
+  items: DocumentChunkPreviewItem[];
+};
+
 export type DocumentRecord = {
   id: string;
   tenant_id: string;
@@ -245,6 +271,15 @@ export async function fetchParsedPreview(documentId: string, tenantId: string): 
   return parseJson<ParsedPreview>(
     await fetch(
       `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/parsed?tenant_id=${encodeURIComponent(tenantId)}`,
+      { cache: "no-store" },
+    ),
+  );
+}
+
+export async function fetchChunkPreview(documentId: string, tenantId: string): Promise<DocumentChunkPreview> {
+  return parseJson<DocumentChunkPreview>(
+    await fetch(
+      `${apiBaseUrl}/api/v1/documents/${encodeURIComponent(documentId)}/preview/chunks?tenant_id=${encodeURIComponent(tenantId)}`,
       { cache: "no-store" },
     ),
   );

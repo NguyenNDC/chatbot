@@ -136,6 +136,32 @@ class DocumentParsedPreviewResponse(BaseModel):
     plain_text: str = ""
 
 
+class DocumentChunkPreviewItem(BaseModel):
+    chunk_id: str
+    chunk_index: int
+    section_name: str
+    heading_path: list[str] = Field(default_factory=list)
+    page_start: int | None = None
+    page_end: int | None = None
+    source_offset_start: int | None = None
+    source_offset_end: int | None = None
+    token_estimate: int
+    parse_quality_score: float | None = None
+    content: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class DocumentChunkPreviewResponse(BaseModel):
+    document_id: str
+    document_version_id: str
+    version_label: str
+    title: str
+    chunk_target_tokens: int
+    chunk_overlap_tokens: int
+    total_chunks: int
+    items: list[DocumentChunkPreviewItem] = Field(default_factory=list)
+
+
 class DocumentDeleteResponse(BaseModel):
     document_id: str
     tenant_id: str

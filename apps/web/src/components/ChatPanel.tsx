@@ -31,6 +31,11 @@ const starterPrompts = [
 ];
 
 type PendingChatMessage = ChatMessageRecord & { pending?: boolean };
+type StreamingChatMessage = PendingChatMessage & {
+  streaming?: boolean;
+  renderedContent?: string;
+  finalContent?: string;
+};
 
 function createId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -216,7 +221,7 @@ function sessionGroups(sessions: ChatSessionRecord[], query: string) {
 
 export function ChatPanel({ tenantId, documents }: { tenantId: string; documents: DocumentRecord[] }) {
   const [sessions, setSessions] = useState<ChatSessionRecord[]>([]);
-  const [messages, setMessages] = useState<PendingChatMessage[]>([]);
+  const [messages, setMessages] = useState<StreamingChatMessage[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [draft, setDraft] = useState("");
@@ -224,18 +229,75 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const streamTimerRef = useRef<number | null>(null);
 
   const status = useMemo(() => knowledgeStatus(documents), [documents]);
   const filteredSessions = useMemo(() => sessionGroups(sessions, query), [query, sessions]);
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
 
+  const clearStreamTimer = () => {
+    if (streamTimerRef.current !== null) {
+      window.clearInterval(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+  };
+
+  const displayMessageContent = (message: StreamingChatMessage) => {
+    if (message.pending) {
+      return "Dang soan cau tra loi...";
+    }
+    if (message.streaming) {
+      return message.renderedContent ?? "";
+    }
+    return readableMessageContent(message.finalContent ?? message.content);
+  };
+
+  const startAssistantStreaming = (messageId: string, fullContent: string) => {
+    clearStreamTimer();
+    if (!fullContent.trim()) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? { ...message, pending: false, streaming: false, renderedContent: "", finalContent: fullContent }
+            : message,
+        ),
+      );
+      return;
+    }
+
+    let cursor = 0;
+    const total = fullContent.length;
+    streamTimerRef.current = window.setInterval(() => {
+      cursor = Math.min(total, cursor + Math.max(3, Math.ceil((total - cursor) / 18)));
+      const nextSlice = fullContent.slice(0, cursor);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                pending: false,
+                streaming: cursor < total,
+                renderedContent: nextSlice,
+                finalContent: fullContent,
+              }
+            : message,
+        ),
+      );
+      if (cursor >= total) {
+        clearStreamTimer();
+      }
+    }, 24);
+  };
+
   const loadMessages = async (sessionId: string) => {
+    clearStreamTimer();
     setMessages(await fetchChatMessages(sessionId, tenantId));
   };
 
   const loadSessions = async (preferredSessionId?: string | null) => {
     setLoading(true);
     setError(null);
+    clearStreamTimer();
     try {
       const items = await fetchChatSessions(tenantId);
       if (items.length === 0) {
@@ -262,6 +324,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
   const createSession = async () => {
     setLoading(true);
     setError(null);
+    clearStreamTimer();
     try {
       const session = await createChatSession({ tenantId, title: "Cuoc tro chuyen moi" });
       const items = await fetchChatSessions(tenantId);
@@ -288,11 +351,14 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
     thread.scrollTop = thread.scrollHeight;
   }, [messages]);
 
+  useEffect(() => () => clearStreamTimer(), []);
+
   const send = async () => {
     const question = draft.trim();
     if (!question || !activeSessionId) {
       return;
     }
+    clearStreamTimer();
     const pending = createPendingMessages(tenantId, activeSessionId, question);
     setDraft("");
     setError(null);
@@ -310,10 +376,20 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
             return response.user_message;
           }
           if (message.id === pending.assistant.id) {
-            return response.assistant_message;
+            return {
+              ...response.assistant_message,
+              pending: false,
+              streaming: true,
+              renderedContent: "",
+              finalContent: readableMessageContent(response.assistant_message.content),
+            };
           }
           return message;
         }),
+      );
+      startAssistantStreaming(
+        response.assistant_message.id,
+        readableMessageContent(response.assistant_message.content),
       );
       setSessions(await fetchChatSessions(tenantId));
       setActiveSessionId(response.session.id);
@@ -340,7 +416,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
   };
 
   return (
-    <section className="surface grid min-h-[880px] min-w-0 grid-rows-[auto_1fr] overflow-hidden rounded-lg">
+    <section className="surface grid h-full min-h-0 min-w-0 grid-rows-[auto_1fr] overflow-hidden rounded-lg">
       <header className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h2 className="text-sm font-bold">Chatbot tenant</h2>
@@ -442,7 +518,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
             <span className="badge-neutral">Balanced</span>
           </div>
 
-          <div className="overflow-auto bg-white p-4 app-scrollbar" ref={threadRef}>
+          <div className="min-h-0 overflow-y-auto overflow-x-hidden bg-white p-4 app-scrollbar" ref={threadRef}>
             {error ? <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div> : null}
             {messages.length === 0 ? (
               <div className="grid gap-4 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-5">
@@ -482,14 +558,17 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                               : "border-slate-200 bg-white text-ink-950",
                         )}
                       >
-                        <div className="whitespace-pre-wrap break-words">{message.pending ? "Dang soan cau tra loi..." : readableMessageContent(message.content)}</div>
+                        <div className="whitespace-pre-wrap break-words">
+                          {displayMessageContent(message)}
+                          {message.streaming ? <span className="ml-1 inline-block h-5 w-2 animate-pulse rounded-sm bg-ocean-500/80 align-middle" /> : null}
+                        </div>
                         {message.answer_type && message.answer_type !== "grounded" ? <span className="badge-neutral w-fit">{answerLabel(message.answer_type)}</span> : null}
-                        {message.citations.length > 0 ? (
+                        {!message.pending && !message.streaming && message.citations.length > 0 ? (
                           <div className="rounded-md bg-slate-50 px-3 py-2 text-xs leading-6 text-slate-600">
                             <strong className="text-slate-700">Trich tu:</strong> {citationSummary(message.citations)}
                           </div>
                         ) : null}
-                        {message.citations.length > 0 ? (
+                        {!message.pending && !message.streaming && message.citations.length > 0 ? (
                           <div className="grid gap-2">
                             <div className="text-xs font-bold uppercase tracking-normal text-slate-500">Nguồn tham chiếu</div>
                             <div className="flex flex-wrap gap-2">
@@ -512,7 +591,7 @@ export function ChatPanel({ tenantId, documents }: { tenantId: string; documents
                             </div>
                           </div>
                         ) : null}
-                        {message.contexts.length > 0 ? (
+                        {!message.pending && !message.streaming && message.contexts.length > 0 ? (
                           <details className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-slate-50 p-3">
                             <summary className="cursor-pointer pr-6 text-xs font-bold text-ocean-700">Evidence da dung ({message.contexts.length})</summary>
                             <div className="mt-3 grid min-w-0 gap-2">

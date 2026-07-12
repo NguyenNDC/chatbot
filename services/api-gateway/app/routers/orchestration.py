@@ -13,6 +13,7 @@ from enterprise_ai_core.schemas import (
     ChatMessageListResponse,
     ChatSendMessageRequest,
     ChatSendMessageResponse,
+    DocumentChunkPreviewResponse,
     ChatSessionCreateRequest,
     ChatSessionItem,
     ChatSessionListResponse,
@@ -611,6 +612,20 @@ async def preview_parsed_document(
         )
     response.raise_for_status()
     return DocumentParsedPreviewResponse.model_validate(response.json())
+
+
+@router.get("/documents/{document_id}/preview/chunks", response_model=DocumentChunkPreviewResponse)
+async def preview_document_chunks(
+    document_id: str,
+    tenant_id: str = Query(...),
+) -> DocumentChunkPreviewResponse:
+    async with httpx.AsyncClient(timeout=settings.gateway_service_timeout_seconds) as client:
+        response = await client.get(
+            f"{settings.document_service_url}{settings.api_prefix}/documents/{document_id}/preview/chunks",
+            params={"tenant_id": tenant_id},
+        )
+    response.raise_for_status()
+    return DocumentChunkPreviewResponse.model_validate(response.json())
 
 
 @router.post("/query", response_model=QueryResponse)

@@ -16,19 +16,88 @@ import {
   deleteDocument,
   fetchDocuments,
   fetchJobs,
+  fetchChunkPreview,
   fetchParsedPreview,
   rawDocumentPreviewUrl,
   reprocessDocument,
   uploadDocument,
+  type DocumentChunkPreview,
   type DocumentRecord,
   type JobRecord,
   type ParsedPreview,
 } from "../lib/api";
 import { cx, formatBytes, formatDateTime, progressCounter, statusTone } from "../lib/format";
 
-type PreviewState =
-  | { mode: "raw"; document: DocumentRecord }
-  | { mode: "parsed"; document: DocumentRecord; parsed?: ParsedPreview; loading?: boolean; error?: string };
+type PreviewTab = "raw" | "parsed" | "chunks";
+
+type PreviewState = {
+  document: DocumentRecord;
+  activeTab: PreviewTab;
+  parsed?: ParsedPreview;
+  parsedLoading?: boolean;
+  parsedError?: string;
+  chunks?: DocumentChunkPreview;
+  chunksLoading?: boolean;
+  chunksError?: string;
+};
+
+function previewTitle(document: DocumentRecord) {
+  return document.content_type?.includes("pdf")
+    ? "PDF goc"
+    : document.content_type?.startsWith("image/")
+      ? "Anh goc"
+      : "Tai lieu goc";
+}
+
+function renderRawPreview(document: DocumentRecord, tenantId: string) {
+  const url = rawDocumentPreviewUrl(document.id, tenantId);
+  const contentType = document.content_type?.toLowerCase() ?? "";
+
+  if (contentType.startsWith("image/")) {
+    return (
+      <div className="flex min-h-[78vh] items-center justify-center rounded-md border border-slate-200 bg-slate-900/95 p-4">
+        <img alt={document.title} className="max-h-[74vh] max-w-full rounded-md object-contain shadow-lg" src={url} />
+      </div>
+    );
+  }
+
+  if (contentType.includes("pdf")) {
+    return (
+      <object className="h-full min-h-[78vh] w-full rounded-md border border-slate-200 bg-white" data={url} type={document.content_type}>
+        <iframe className="h-full min-h-[78vh] w-full rounded-md border border-slate-200 bg-white" src={url} title={document.title} />
+      </object>
+    );
+  }
+
+  if (
+    contentType.startsWith("text/") ||
+    contentType.includes("json") ||
+    contentType.includes("xml") ||
+    contentType.includes("html")
+  ) {
+    return (
+      <iframe className="h-full min-h-[78vh] w-full rounded-md border border-slate-200 bg-white" src={url} title={document.title} />
+    );
+  }
+
+  return (
+    <div className="grid gap-3 rounded-lg border border-slate-200 bg-white p-5 text-sm text-slate-600">
+      <div className="font-semibold text-slate-800">Trinh duyet khong preview on-screen tot cho dinh dang nay.</div>
+      <div>
+        Tai lieu goc van duoc mo qua endpoint inline. Voi mot so dinh dang nhu `docx`, `xlsx`, `pptx`, trinh duyet co the tu dong tai file thay vi render.
+      </div>
+      <a
+        className="btn-secondary w-fit"
+        href={url}
+        rel="noreferrer"
+        target="_blank"
+      >
+        <Eye className="h-4 w-4" />
+        Mo tai lieu goc
+      </a>
+    </div>
+  );
+}
 
 function StageBadge({ status }: { status?: string | null }) {
   const tone = statusTone(status);
@@ -165,22 +234,90 @@ export function DocumentPanel({
     }
   };
 
-  const openParsedPreview = async (document: DocumentRecord) => {
-    setPreview({ mode: "parsed", document, loading: true });
+  const ensureParsedPreview = async (documentId: string) => {
+    setPreview((current) => {
+      if (!current || current.document.id !== documentId || current.parsed || current.parsedLoading) {
+        return current;
+      }
+      return { ...current, parsedLoading: true, parsedError: undefined };
+    });
     try {
-      const parsed = await fetchParsedPreview(document.id, tenantId);
-      setPreview({ mode: "parsed", document, parsed });
+      const parsed = await fetchParsedPreview(documentId, tenantId);
+      setPreview((current) =>
+        current && current.document.id === documentId
+          ? { ...current, parsed, parsedLoading: false, parsedError: undefined }
+          : current,
+      );
     } catch (error) {
-      setPreview({
-        mode: "parsed",
-        document,
-        error: error instanceof Error ? error.message : "Cannot load parsed preview",
-      });
+      setPreview((current) =>
+        current && current.document.id === documentId
+          ? {
+              ...current,
+              parsedLoading: false,
+              parsedError: error instanceof Error ? error.message : "Cannot load parsed preview",
+            }
+          : current,
+      );
+    }
+  };
+
+  const ensureChunkPreview = async (documentId: string) => {
+    setPreview((current) => {
+      if (!current || current.document.id !== documentId || current.chunks || current.chunksLoading) {
+        return current;
+      }
+      return { ...current, chunksLoading: true, chunksError: undefined };
+    });
+    try {
+      const chunks = await fetchChunkPreview(documentId, tenantId);
+      setPreview((current) =>
+        current && current.document.id === documentId
+          ? { ...current, chunks, chunksLoading: false, chunksError: undefined }
+          : current,
+      );
+    } catch (error) {
+      setPreview((current) =>
+        current && current.document.id === documentId
+          ? {
+              ...current,
+              chunksLoading: false,
+              chunksError: error instanceof Error ? error.message : "Cannot load chunk preview",
+            }
+          : current,
+      );
+    }
+  };
+
+  const openPreview = (document: DocumentRecord, activeTab: PreviewTab) => {
+    setPreview({
+      document,
+      activeTab,
+      parsedLoading: activeTab === "parsed",
+      chunksLoading: activeTab === "chunks",
+    });
+    if (activeTab === "parsed") {
+      void ensureParsedPreview(document.id);
+    }
+    if (activeTab === "chunks") {
+      void ensureChunkPreview(document.id);
+    }
+  };
+
+  const switchPreviewTab = (tab: PreviewTab) => {
+    setPreview((current) => (current ? { ...current, activeTab: tab } : current));
+    if (!preview) {
+      return;
+    }
+    if (tab === "parsed" && !preview.parsed && !preview.parsedLoading) {
+      void ensureParsedPreview(preview.document.id);
+    }
+    if (tab === "chunks" && !preview.chunks && !preview.chunksLoading) {
+      void ensureChunkPreview(preview.document.id);
     }
   };
 
   return (
-    <section className="grid min-w-0 gap-4">
+    <section className="grid min-h-0 min-w-0 gap-4 overflow-y-auto pr-1 app-scrollbar">
       <div className="surface rounded-lg">
         <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
           <div>
@@ -238,11 +375,11 @@ export function DocumentPanel({
                 ) : null}
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <button className="btn-secondary" type="button" onClick={() => setPreview({ mode: "raw", document })}>
+                  <button className="btn-secondary" type="button" onClick={() => openPreview(document, "raw")}>
                     <Eye className="h-4 w-4" />
                     Ban goc
                   </button>
-                  <button className="btn-secondary" type="button" onClick={() => openParsedPreview(document)}>
+                  <button className="btn-secondary" type="button" onClick={() => openPreview(document, "parsed")}>
                     <FileText className="h-4 w-4" />
                     OCR / parsed
                   </button>
@@ -307,21 +444,60 @@ export function DocumentPanel({
                 <div className="truncate text-sm font-bold">{preview.document.title}</div>
                 <div className="truncate text-xs text-slate-500">{preview.document.file_name}</div>
               </div>
+              <div className="hidden items-center gap-2 md:flex">
+                {(["raw", "parsed", "chunks"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    className={cx(
+                      "rounded-md px-3 py-2 text-xs font-semibold transition",
+                      preview.activeTab === tab
+                        ? "bg-ink-950 text-white"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200",
+                    )}
+                    type="button"
+                    onClick={() => switchPreviewTab(tab)}
+                  >
+                    {tab === "raw" ? "Ban goc" : tab === "parsed" ? "OCR / parsed" : "Chunk"}
+                  </button>
+                ))}
+              </div>
               <button className="icon-btn" type="button" onClick={() => setPreview(null)}>
                 <X className="h-4 w-4" />
               </button>
             </div>
             <div className="min-h-0 overflow-auto bg-slate-50 p-4 app-scrollbar">
-              {preview.mode === "raw" ? (
-                <iframe className="h-full min-h-[78vh] w-full rounded-md border border-slate-200 bg-white" src={rawDocumentPreviewUrl(preview.document.id, tenantId)} title={preview.document.title} />
-              ) : preview.loading ? (
+              <div className="mb-4 flex flex-wrap gap-2 md:hidden">
+                {(["raw", "parsed", "chunks"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    className={cx(
+                      "rounded-md px-3 py-2 text-xs font-semibold transition",
+                      preview.activeTab === tab
+                        ? "bg-ink-950 text-white"
+                        : "bg-white text-slate-600 ring-1 ring-slate-200 hover:bg-slate-100",
+                    )}
+                    type="button"
+                    onClick={() => switchPreviewTab(tab)}
+                  >
+                    {tab === "raw" ? "Ban goc" : tab === "parsed" ? "OCR / parsed" : "Chunk"}
+                  </button>
+                ))}
+              </div>
+              {preview.activeTab === "raw" ? (
+                <div className="grid gap-3">
+                  <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
+                    {previewTitle(preview.document)}
+                  </div>
+                  {renderRawPreview(preview.document, tenantId)}
+                </div>
+              ) : preview.activeTab === "parsed" && preview.parsedLoading ? (
                 <div className="flex items-center gap-2 text-sm text-slate-600">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   Dang tai parsed preview...
                 </div>
-              ) : preview.error ? (
-                <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">{preview.error}</div>
-              ) : preview.parsed ? (
+              ) : preview.activeTab === "parsed" && preview.parsedError ? (
+                <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">{preview.parsedError}</div>
+              ) : preview.activeTab === "parsed" && preview.parsed ? (
                 <div className="grid gap-4">
                   <div className="grid gap-3 md:grid-cols-3">
                     <div className="rounded-lg border border-slate-200 bg-white p-3">
@@ -340,6 +516,53 @@ export function DocumentPanel({
                   <pre className="whitespace-pre-wrap rounded-lg border border-slate-200 bg-white p-4 font-mono text-sm leading-7 text-slate-800">
                     {preview.parsed.plain_text || "Khong co plain text."}
                   </pre>
+                </div>
+              ) : preview.activeTab === "chunks" && preview.chunksLoading ? (
+                <div className="flex items-center gap-2 text-sm text-slate-600">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Dang tai chunk preview...
+                </div>
+              ) : preview.activeTab === "chunks" && preview.chunksError ? (
+                <div className="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700">{preview.chunksError}</div>
+              ) : preview.activeTab === "chunks" && preview.chunks ? (
+                <div className="grid gap-4">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg border border-slate-200 bg-white p-3">
+                      <div className="label">Tong chunk</div>
+                      <div className="mt-1 font-semibold">{preview.chunks.total_chunks}</div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-3">
+                      <div className="label">Target tokens</div>
+                      <div className="mt-1 font-semibold">{preview.chunks.chunk_target_tokens}</div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-3">
+                      <div className="label">Overlap</div>
+                      <div className="mt-1 font-semibold">{preview.chunks.chunk_overlap_tokens}</div>
+                    </div>
+                  </div>
+                  <div className="grid gap-3">
+                    {preview.chunks.items.map((chunk) => (
+                      <article className="rounded-lg border border-slate-200 bg-white p-4" key={chunk.chunk_id}>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-bold text-slate-800">
+                              Chunk #{chunk.chunk_index + 1} <span className="font-normal text-slate-500">({chunk.token_estimate} tokens)</span>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">
+                              {(chunk.heading_path.length > 0 ? chunk.heading_path.join(" > ") : chunk.section_name) || "body"}
+                            </div>
+                          </div>
+                          <div className="text-right text-xs text-slate-500">
+                            <div>{chunk.page_start ? `Trang ${chunk.page_start}${chunk.page_end && chunk.page_end !== chunk.page_start ? `-${chunk.page_end}` : ""}` : "Khong ro trang"}</div>
+                            <div>{chunk.parse_quality_score != null ? `Quality ${chunk.parse_quality_score.toFixed(2)}` : "No quality score"}</div>
+                          </div>
+                        </div>
+                        <pre className="mt-3 whitespace-pre-wrap break-words rounded-md bg-slate-50 p-3 font-mono text-xs leading-6 text-slate-700">
+                          {chunk.content}
+                        </pre>
+                      </article>
+                    ))}
+                  </div>
                 </div>
               ) : null}
             </div>
