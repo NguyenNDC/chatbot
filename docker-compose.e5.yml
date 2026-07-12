@@ -1,18 +1,28 @@
 services:
   retrieval-service:
+    gpus: all
     build:
       args:
         REQUIREMENTS_GROUPS: base,graph,ml
     environment:
       EMBEDDING_PROVIDER: e5
       EMBEDDING_MODEL_NAME: intfloat/multilingual-e5-base
+      EMBEDDING_DEVICE: cuda
+      EMBEDDING_USE_FP16: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       PRELOAD_EMBEDDING_MODEL: "true"
 
   worker-runner:
+    gpus: all
     build:
       args:
         REQUIREMENTS_GROUPS: base,queue,storage,graph,parsing,ml
     environment:
       EMBEDDING_PROVIDER: e5
       EMBEDDING_MODEL_NAME: intfloat/multilingual-e5-base
+      EMBEDDING_DEVICE: cuda
+      EMBEDDING_USE_FP16: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
       PRELOAD_EMBEDDING_MODEL: "true"

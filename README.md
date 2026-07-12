@@ -108,6 +108,9 @@ File override nay se tu dong:
 - cai them `requirements/ml.txt` cho `retrieval-service`
 - cai them `requirements/ml.txt` cho `worker-runner`
 - bat `EMBEDDING_PROVIDER=bge-m3`
+- bat `EMBEDDING_DEVICE=cuda`
+- bat `EMBEDDING_USE_FP16=true`
+- gan `gpus: all` cho `retrieval-service` va `worker-runner`
 - bat `PRELOAD_EMBEDDING_MODEL=true`
 
 ### 3b. Chay semantic retrieval nhe hon voi `multilingual-e5-base`
@@ -132,6 +135,9 @@ File override nay se:
 - cai them `requirements/ml.txt` cho `worker-runner`
 - bat `EMBEDDING_PROVIDER=e5`
 - bat `EMBEDDING_MODEL_NAME=intfloat/multilingual-e5-base`
+- bat `EMBEDDING_DEVICE=cuda`
+- bat `EMBEDDING_USE_FP16=true`
+- gan `gpus: all` cho `retrieval-service` va `worker-runner`
 - bat `PRELOAD_EMBEDDING_MODEL=true`
 
 Service URLs:
@@ -216,6 +222,13 @@ Neu muon dung embedding model ML local nhu `bge-m3` hoac `multilingual-e5-base`,
 
 ```bash
 pip install -r requirements/ml.txt
+```
+
+Neu may local da nhan GPU va `torch.cuda.is_available()` tra ve `True`, co the ep provider dung GPU:
+
+```bash
+$env:EMBEDDING_DEVICE = "cuda"
+$env:EMBEDDING_USE_FP16 = "true"
 ```
 
 Vi `multilingual-e5-*` la retrieval model bat doi xung, codebase da tu dong gan prefix:

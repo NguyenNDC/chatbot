@@ -58,6 +58,7 @@ class HashEmbeddingProvider(BaseEmbeddingProvider):
 class BgeM3EmbeddingProvider(BaseEmbeddingProvider):
     def __init__(self) -> None:
         try:
+            import torch
             from FlagEmbedding import BGEM3FlagModel  # type: ignore
         except ImportError as exc:
             raise RuntimeError(
@@ -65,7 +66,23 @@ class BgeM3EmbeddingProvider(BaseEmbeddingProvider):
             ) from exc
 
         settings = get_settings()
-        self.model = BGEM3FlagModel(settings.embedding_model_name, use_fp16=False)
+        self.device = resolve_torch_device(torch, settings.embedding_device)
+        self.use_fp16 = bool(settings.embedding_use_fp16 and self.device.startswith("cuda"))
+        try:
+            self.model = BGEM3FlagModel(
+                settings.embedding_model_name,
+                use_fp16=self.use_fp16,
+                device=self.device,
+            )
+        except TypeError:
+            self.model = BGEM3FlagModel(
+                settings.embedding_model_name,
+                use_fp16=self.use_fp16,
+            )
+            model_handle = getattr(self.model, "model", None)
+            if model_handle is not None and hasattr(model_handle, "to"):
+                model_handle.to(self.device)
+            setattr(self.model, "device", self.device)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         result = self.model.encode(texts, batch_size=min(8, len(texts)), max_length=2048)
@@ -84,10 +101,16 @@ class E5EmbeddingProvider(BaseEmbeddingProvider):
 
         settings = get_settings()
         self.torch = torch
+        self.device = resolve_torch_device(torch, settings.embedding_device)
+        self.use_fp16 = bool(settings.embedding_use_fp16 and self.device.startswith("cuda"))
         self.target_dimension = settings.embedding_dimension
         self.model_name = settings.embedding_model_name
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name)
+        model_kwargs: dict[str, Any] = {}
+        if self.use_fp16:
+            model_kwargs["torch_dtype"] = torch.float16
+        self.model = AutoModel.from_pretrained(self.model_name, **model_kwargs)
+        self.model.to(self.device)
         self.model.eval()
         self.max_length = 512
 
@@ -116,6 +139,7 @@ class E5EmbeddingProvider(BaseEmbeddingProvider):
                 truncation=True,
                 return_tensors="pt",
             )
+            encoded = {key: value.to(self.device) for key, value in encoded.items()}
             with self.torch.inference_mode():
                 outputs = self.model(**encoded)
             pooled = self._average_pool(outputs.last_hidden_state, encoded["attention_mask"])
@@ -153,16 +177,21 @@ def embedding_runtime_health(service_name: str) -> RuntimeHealthResponse:
         provider = get_embedding_provider()
         sample = provider.embed_queries(["runtime healthcheck"])
         dimension = len(sample[0]) if sample else 0
+        metadata = {
+            "provider": settings.embedding_provider,
+            "model_name": settings.embedding_model_name,
+            "dimension": dimension,
+        }
+        if hasattr(provider, "device"):
+            metadata["device"] = getattr(provider, "device")
+        if hasattr(provider, "use_fp16"):
+            metadata["fp16"] = bool(getattr(provider, "use_fp16"))
         return RuntimeHealthResponse(
             service=service_name,
             runtime="embedding",
             status="ok",
             detail=f"{provider.__class__.__name__} loaded successfully",
-            metadata={
-                "provider": settings.embedding_provider,
-                "model_name": settings.embedding_model_name,
-                "dimension": dimension,
-            },
+            metadata=metadata,
         )
     except Exception as exc:
         return RuntimeHealthResponse(
@@ -173,8 +202,19 @@ def embedding_runtime_health(service_name: str) -> RuntimeHealthResponse:
             metadata={
                 "provider": settings.embedding_provider,
                 "model_name": settings.embedding_model_name,
+                "requested_device": settings.embedding_device,
+                "requested_fp16": settings.embedding_use_fp16,
             },
         )
+
+
+def resolve_torch_device(torch_module: Any, requested_device: str) -> str:
+    normalized = (requested_device or "auto").strip().lower()
+    if normalized == "auto":
+        return "cuda" if torch_module.cuda.is_available() else "cpu"
+    if normalized.startswith("cuda") and not torch_module.cuda.is_available():
+        raise RuntimeError("EMBEDDING_DEVICE is set to CUDA but torch.cuda.is_available() is false.")
+    return normalized
 
 
 @lru_cache

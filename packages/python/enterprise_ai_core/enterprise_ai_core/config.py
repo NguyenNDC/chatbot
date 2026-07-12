@@ -81,6 +81,8 @@ class ServiceSettings(BaseSettings):
     embedding_provider: str = Field(default="bge-m3", alias="EMBEDDING_PROVIDER")
     embedding_model_name: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL_NAME")
     embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
+    embedding_device: str = Field(default="auto", alias="EMBEDDING_DEVICE")
+    embedding_use_fp16: bool = Field(default=False, alias="EMBEDDING_USE_FP16")
     ocr_engine: str = Field(default="tesseract", alias="OCR_ENGINE")
     ocr_languages: str = Field(default="vie+eng", alias="OCR_LANGUAGES")
     ocr_min_characters: int = Field(default=40, alias="OCR_MIN_CHARACTERS")
