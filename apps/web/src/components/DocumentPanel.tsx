@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useId, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -104,6 +104,7 @@ function StageBadge({ status }: { status?: string | null }) {
   return (
     <span
       className={cx(
+        "shrink-0",
         tone === "success" && "badge-success",
         tone === "live" && "badge-live",
         tone === "danger" && "badge-danger",
@@ -171,6 +172,7 @@ export function DocumentPanel({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const fileInputId = useId();
 
   const readyCount = useMemo(() => documents.filter((document) => document.status === "processed").length, [documents]);
 
@@ -317,8 +319,8 @@ export function DocumentPanel({
   };
 
   return (
-    <section className="grid min-h-0 min-w-0 gap-4 overflow-y-auto pr-1 app-scrollbar">
-      <div className="surface rounded-lg">
+    <section className="grid min-h-0 min-w-0 gap-4 overflow-y-auto overflow-x-hidden pr-1 app-scrollbar">
+      <div className="surface min-w-0 overflow-hidden rounded-lg">
         <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
           <div>
             <h2 className="text-sm font-bold">Kho tai lieu</h2>
@@ -335,8 +337,22 @@ export function DocumentPanel({
             <input className="field" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Ten tai lieu" />
             <input className="field" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Tags, cach nhau boi dau phay" />
           </div>
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-            <input className="field py-2" type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+          <div className="grid min-w-0 gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <label
+              className="flex min-w-0 cursor-pointer items-center gap-3 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-ink-950 transition hover:border-slate-300"
+              htmlFor={fileInputId}
+            >
+              <span className="shrink-0 font-semibold text-ink-950">Chon file</span>
+              <span className="min-w-0 flex-1 truncate text-slate-500" title={file?.name ?? "Chua chon file nao"}>
+                {file?.name ?? "Chua chon file nao"}
+              </span>
+            </label>
+            <input
+              className="sr-only"
+              id={fileInputId}
+              type="file"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
             <button className="btn-primary" disabled={loading} type="submit">
               <UploadCloud className="h-4 w-4" />
               Upload
@@ -345,20 +361,25 @@ export function DocumentPanel({
           {message ? <div className="rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600">{message}</div> : null}
         </form>
 
-        <div className="max-h-[680px] divide-y divide-slate-100 overflow-auto app-scrollbar">
+        <div className="max-h-[680px] divide-y divide-slate-100 overflow-y-auto overflow-x-hidden app-scrollbar">
           {documents.length === 0 ? (
             <div className="p-6 text-sm text-slate-500">Chua co tai lieu trong tenant nay.</div>
           ) : (
             documents.map((document) => (
-              <article className="grid gap-3 p-4" key={document.id}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 gap-3">
+              <article className="grid min-w-0 gap-3 p-4" key={document.id}>
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="flex min-w-0 flex-1 gap-3 overflow-hidden">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-slate-100 text-ocean-700">
                       <FileText className="h-5 w-5" />
                     </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-bold">{document.title}</div>
-                      <div className="truncate text-xs text-slate-500">
+                    <div className="min-w-0 flex-1 overflow-hidden">
+                      <div className="truncate text-sm font-bold" title={document.title}>
+                        {document.title}
+                      </div>
+                      <div
+                        className="truncate text-xs text-slate-500"
+                        title={`${document.file_name} | ${formatBytes(document.size_bytes)} | ${document.version}`}
+                      >
                         {document.file_name} | {formatBytes(document.size_bytes)} | {document.version}
                       </div>
                     </div>

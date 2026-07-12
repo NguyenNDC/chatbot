@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import unicodedata
-from functools import lru_cache
 from typing import Any
 
 from .config import get_settings
 from .schemas import RuntimeHealthResponse
+
+_EMBEDDING_PROVIDER_PID: int | None = None
+_EMBEDDING_PROVIDER_INSTANCE: "BaseEmbeddingProvider | None" = None
 
 
 class BaseEmbeddingProvider:
@@ -217,11 +220,20 @@ def resolve_torch_device(torch_module: Any, requested_device: str) -> str:
     return normalized
 
 
-@lru_cache
 def get_embedding_provider() -> BaseEmbeddingProvider:
+    global _EMBEDDING_PROVIDER_INSTANCE, _EMBEDDING_PROVIDER_PID
+    current_pid = os.getpid()
+    if _EMBEDDING_PROVIDER_INSTANCE is not None and _EMBEDDING_PROVIDER_PID == current_pid:
+        return _EMBEDDING_PROVIDER_INSTANCE
+
     settings = get_settings()
     if settings.embedding_provider == "bge-m3":
-        return BgeM3EmbeddingProvider()
-    if settings.embedding_provider in {"e5", "multilingual-e5"}:
-        return E5EmbeddingProvider()
-    return HashEmbeddingProvider(settings.embedding_dimension)
+        provider: BaseEmbeddingProvider = BgeM3EmbeddingProvider()
+    elif settings.embedding_provider in {"e5", "multilingual-e5"}:
+        provider = E5EmbeddingProvider()
+    else:
+        provider = HashEmbeddingProvider(settings.embedding_dimension)
+
+    _EMBEDDING_PROVIDER_INSTANCE = provider
+    _EMBEDDING_PROVIDER_PID = current_pid
+    return provider

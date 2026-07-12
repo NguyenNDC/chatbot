@@ -35,7 +35,6 @@ from enterprise_ai_core.storage import RustFSStorageClient
 celery_app = get_celery_app()
 settings = get_settings()
 storage_client = RustFSStorageClient()
-embedding_provider = get_embedding_provider()
 openrouter_client = OpenRouterClient()
 neo4j_client = get_neo4j_client()
 logger = get_logger(__name__)
@@ -664,6 +663,25 @@ def handle_chunk_stage(
         session.execute(delete(ChunkExtraction).where(ChunkExtraction.document_chunk_id.in_(obsolete_ids)))
         session.execute(delete(DocumentChunk).where(DocumentChunk.id.in_(obsolete_ids)))
 
+    retained_chunk_ids = list(retained_ids)
+    existing_embedding_ids: set[str] = set()
+    existing_extraction_ids: set[str] = set()
+    if retained_chunk_ids:
+        existing_embedding_ids = set(
+            session.scalars(
+                select(ChunkEmbedding.document_chunk_id).where(
+                    ChunkEmbedding.document_chunk_id.in_(retained_chunk_ids)
+                )
+            ).all()
+        )
+        existing_extraction_ids = set(
+            session.scalars(
+                select(ChunkExtraction.document_chunk_id).where(
+                    ChunkExtraction.document_chunk_id.in_(retained_chunk_ids)
+                )
+            ).all()
+        )
+
     if processing_mode == "full":
         reprocess_ids = list(retained_ids)
         if reprocess_ids:
@@ -676,8 +694,18 @@ def handle_chunk_stage(
         chunk_ids_requiring_embedding = reprocess_ids
         chunk_ids_requiring_extraction = reprocess_ids
     else:
-        chunk_ids_requiring_embedding = changed_chunk_ids
-        chunk_ids_requiring_extraction = changed_chunk_ids
+        missing_embedding_ids = [
+            chunk_id for chunk_id in retained_chunk_ids if chunk_id not in existing_embedding_ids
+        ]
+        missing_extraction_ids = [
+            chunk_id for chunk_id in retained_chunk_ids if chunk_id not in existing_extraction_ids
+        ]
+        chunk_ids_requiring_embedding = list(
+            dict.fromkeys([*changed_chunk_ids, *missing_embedding_ids])
+        )
+        chunk_ids_requiring_extraction = list(
+            dict.fromkeys([*changed_chunk_ids, *missing_extraction_ids])
+        )
 
     chunks_object_key = str(
         PurePosixPath(document.tenant_id)
@@ -777,6 +805,7 @@ def handle_embed_stage(
         )
         return
 
+    embedding_provider = get_embedding_provider()
     vectors = embedding_provider.embed_documents([chunk.content for chunk in chunk_rows])
     session.execute(
         delete(ChunkEmbedding).where(
