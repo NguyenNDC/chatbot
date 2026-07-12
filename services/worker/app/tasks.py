@@ -777,7 +777,7 @@ def handle_embed_stage(
         )
         return
 
-    vectors = embedding_provider.embed([chunk.content for chunk in chunk_rows])
+    vectors = embedding_provider.embed_documents([chunk.content for chunk in chunk_rows])
     session.execute(
         delete(ChunkEmbedding).where(
             ChunkEmbedding.document_chunk_id.in_([chunk.id for chunk in chunk_rows])

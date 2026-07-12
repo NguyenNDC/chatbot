@@ -43,6 +43,8 @@ Return exactly one JSON object that follows this shape:
 The "answer" field must be a readable chatbot response, not an API object.
 Do not put chunk IDs/UUIDs in "answer"; put supporting chunk IDs only in the "citations" array.
 Do not write "[Context 1]" or similar labels in "answer". If you need to mention a source naturally, use the human source label.
+If "answer_type" is "grounded" or "partial", the "citations" array must contain at least one supporting context ID.
+If you cannot connect the answer to a specific context ID, downgrade to "partial" or "no_answer" instead of guessing.
 """.strip()
 
 NO_ANSWER_TEMPLATE = (

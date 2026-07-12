@@ -150,7 +150,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
     answer_text = strip_internal_citation_ids(raw_answer_text)
 
     if disposition in {AnswerDisposition.GROUNDED, AnswerDisposition.PARTIAL} and not citations:
-        citations = [selected_contexts[0].source]
+        disposition = AnswerDisposition.PARTIAL
     if not answer_text:
         answer_text = fallback_text_for(disposition)
 
@@ -159,6 +159,8 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
     )
     if not policy_summary:
         policy_summary = default_policy_summary(disposition)
+    if disposition == AnswerDisposition.PARTIAL and not citations:
+        policy_summary = dedupe_strings([*policy_summary, "missing-citation-link"])
 
     clarification_question = normalize_optional_text(answer_payload.get("clarification_question"))
     refusal_reason = normalize_optional_text(answer_payload.get("refusal_reason"))

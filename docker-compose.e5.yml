@@ -4,8 +4,8 @@ services:
       args:
         REQUIREMENTS_GROUPS: base,graph,ml
     environment:
-      EMBEDDING_PROVIDER: bge-m3
-      EMBEDDING_MODEL_NAME: BAAI/bge-m3
+      EMBEDDING_PROVIDER: e5
+      EMBEDDING_MODEL_NAME: intfloat/multilingual-e5-base
       PRELOAD_EMBEDDING_MODEL: "true"
 
   worker-runner:
@@ -13,6 +13,6 @@ services:
       args:
         REQUIREMENTS_GROUPS: base,queue,storage,graph,parsing,ml
     environment:
-      EMBEDDING_PROVIDER: bge-m3
-      EMBEDDING_MODEL_NAME: BAAI/bge-m3
+      EMBEDDING_PROVIDER: e5
+      EMBEDDING_MODEL_NAME: intfloat/multilingual-e5-base
       PRELOAD_EMBEDDING_MODEL: "true"

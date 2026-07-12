@@ -73,7 +73,7 @@ services:
       EMBEDDING_PROVIDER: ${DOCKER_EMBEDDING_PROVIDER:-hash}
       EMBEDDING_MODEL_NAME: ${DOCKER_EMBEDDING_MODEL_NAME:-hash-1024}
       HF_HOME: /opt/hf-cache
-      PRELOAD_BGE_M3: ${PRELOAD_BGE_M3:-false}
+      PRELOAD_EMBEDDING_MODEL: ${PRELOAD_EMBEDDING_MODEL:-${PRELOAD_BGE_M3:-false}}
     ports:
       - "8002:8002"
     volumes:
@@ -155,7 +155,7 @@ services:
       EMBEDDING_PROVIDER: ${DOCKER_EMBEDDING_PROVIDER:-hash}
       EMBEDDING_MODEL_NAME: ${DOCKER_EMBEDDING_MODEL_NAME:-hash-1024}
       HF_HOME: /opt/hf-cache
-      PRELOAD_BGE_M3: ${PRELOAD_BGE_M3:-false}
+      PRELOAD_EMBEDDING_MODEL: ${PRELOAD_EMBEDDING_MODEL:-${PRELOAD_BGE_M3:-false}}
     command:
       - sh
       - -c

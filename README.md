@@ -26,6 +26,7 @@ Monorepo cho mot he thong enterprise chatbot theo huong Graph RAG, gom luong ing
 - LLM gateway: OpenRouter
 - Docker dev mac dinh: `hash-1024`
 - Full ML tuy chon: `BAAI/bge-m3`
+- Lightweight semantic retrieval tuy chon: `intfloat/multilingual-e5-base`
 
 ## Cau truc dependency
 
@@ -36,7 +37,7 @@ Python dependencies da duoc tach theo nhom de tranh moi service phai keo ca OCR 
 - `requirements/storage.txt`: boto3
 - `requirements/graph.txt`: neo4j
 - `requirements/parsing.txt`: PDF, DOCX, PPTX, OCR, HTML parsing
-- `requirements/ml.txt`: `FlagEmbedding`, `torch`, `sentencepiece`
+- `requirements/ml.txt`: `FlagEmbedding`, `torch`, `transformers`, `sentencepiece`
 
 Root `requirements.txt` van include toan bo nhom de ai can cai full local van dung duoc.
 
@@ -107,7 +108,31 @@ File override nay se tu dong:
 - cai them `requirements/ml.txt` cho `retrieval-service`
 - cai them `requirements/ml.txt` cho `worker-runner`
 - bat `EMBEDDING_PROVIDER=bge-m3`
-- bat `PRELOAD_BGE_M3=true`
+- bat `PRELOAD_EMBEDDING_MODEL=true`
+
+### 3b. Chay semantic retrieval nhe hon voi `multilingual-e5-base`
+
+Neu ban muon retrieval tot hon `hash` nhung nhe hon `bge-m3`, dung file override [docker-compose.e5.yml](D:\chatbot\docker-compose.e5.yml).
+
+Chay full stack voi `e5-base`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e5.yml up -d --build
+```
+
+Neu chi can nang cap 2 service lien quan den embedding:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.e5.yml up -d --build retrieval-service worker-runner
+```
+
+File override nay se:
+
+- cai them `requirements/ml.txt` cho `retrieval-service`
+- cai them `requirements/ml.txt` cho `worker-runner`
+- bat `EMBEDDING_PROVIDER=e5`
+- bat `EMBEDDING_MODEL_NAME=intfloat/multilingual-e5-base`
+- bat `PRELOAD_EMBEDDING_MODEL=true`
 
 Service URLs:
 
@@ -187,11 +212,16 @@ pip install -r requirements/base.txt -r requirements/graph.txt
 uvicorn main:app --host 0.0.0.0 --port 8002 --app-dir services/retrieval-service/app
 ```
 
-Neu muon dung `bge-m3` local, cai them:
+Neu muon dung embedding model ML local nhu `bge-m3` hoac `multilingual-e5-base`, cai them:
 
 ```bash
 pip install -r requirements/ml.txt
 ```
+
+Vi `multilingual-e5-*` la retrieval model bat doi xung, codebase da tu dong gan prefix:
+
+- query se duoc embed theo dang `query: ...`
+- chunk tai lieu se duoc embed theo dang `passage: ...`
 
 ### Graph Service
 
@@ -222,7 +252,7 @@ cd services/worker/app
 celery -A celery_app:celery_app worker --loglevel=info -Q document.parse,document.chunk,document.embed,graph.extract,graph.upsert,document.dead_letter
 ```
 
-Neu muon worker-runner dung `bge-m3` local, cai them:
+Neu muon worker-runner dung embedding model ML local, cai them:
 
 ```bash
 pip install -r requirements/ml.txt
@@ -397,7 +427,7 @@ Luu y tenant:
 - `retrieval-service` o dev mode da duoc giam nhe bang `hash` embedding.
 - `document-service` khong con keo parsing/OCR stack, nen build nhanh hon dang ke.
 - `worker` chi la control API nen da duoc tach ra de build nhe hon.
-- Chi khi bat full ML moi phai keo `torch`, `FlagEmbedding` va preload `bge-m3`.
+- Chi khi bat full ML moi phai keo `torch`, `transformers`, `FlagEmbedding` va preload embedding model.
 - Neu khong co `OPENROUTER_API_KEY`, flow extract/generate se khong hoan chinh.
 - Hien chua co migration framework chinh thuc, nen moi thay doi schema production can duoc kiem soat thu cong.
 

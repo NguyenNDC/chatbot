@@ -1,5 +1,6 @@
 import math
 import re
+import unicodedata
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends
@@ -40,6 +41,11 @@ STOP_TERMS = {
     "va",
     "voi",
 }
+VECTOR_CANDIDATE_MULTIPLIER = 4
+VECTOR_CANDIDATE_FLOOR = 18
+LEXICAL_SUPPLEMENT_TOP_K = 8
+SHORT_CONTEXT_CHAR_THRESHOLD = 80
+MEDIUM_CONTEXT_CHAR_THRESHOLD = 180
 
 
 @router.post("/retrieve")
@@ -48,6 +54,13 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
     subqueries = build_subqueries(payload.question, intent)
     query_terms = normalize_terms(" ".join(subqueries))
     vector_contexts = vector_search(payload, db, subqueries, intent)
+    lexical_contexts = lexical_fallback(
+        payload,
+        db,
+        query_terms,
+        intent,
+        limit=max(payload.top_k, LEXICAL_SUPPLEMENT_TOP_K),
+    )
     try:
         graph_contexts = (
             graph_search(payload, query_terms, db, intent)
@@ -57,16 +70,18 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
     except Exception:
         graph_contexts = []
 
-    contexts = merge_contexts(vector_contexts, graph_contexts)
+    contexts = merge_contexts(vector_contexts, graph_contexts, lexical_contexts)
     contexts = rerank_contexts(contexts, query_terms, intent)
     contexts = enforce_evidence_threshold(contexts)
     contexts = contexts[: payload.top_k]
 
     source = (
         "hybrid"
-        if vector_contexts and graph_contexts
+        if sum(bool(source_group) for source_group in (vector_contexts, graph_contexts, lexical_contexts)) >= 2
         else "pgvector"
         if vector_contexts
+        else "lexical"
+        if lexical_contexts
         else "graph"
         if graph_contexts
         else "empty"
@@ -121,7 +136,7 @@ def build_subqueries(question: str, intent: str) -> list[str]:
 
 
 def normalize_terms(text: str) -> list[str]:
-    tokens = [token for token in re.split(r"\W+", text.lower()) if len(token) >= 3]
+    tokens = [token for token in re.split(r"\W+", normalize_search_text(text)) if len(token) >= 3]
     deduped: list[str] = []
     seen: set[str] = set()
     for token in tokens:
@@ -130,6 +145,12 @@ def normalize_terms(text: str) -> list[str]:
         seen.add(token)
         deduped.append(token)
     return deduped[:10]
+
+
+def normalize_search_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text.lower()).replace("đ", "d")
+    without_marks = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    return " ".join(re.sub(r"[^a-z0-9\s]", " ", without_marks).split())
 
 
 def build_version_filters(payload: QueryRequest) -> list:
@@ -390,12 +411,14 @@ def vector_search(
     subqueries: list[str],
     intent: str,
 ) -> list[RetrievalChunk]:
-    vector_limit = payload.top_k + settings.retrieval_compare_extra_k if intent == "compare" else payload.top_k
+    vector_limit = max(payload.top_k * VECTOR_CANDIDATE_MULTIPLIER, VECTOR_CANDIDATE_FLOOR)
+    if intent == "compare":
+        vector_limit += settings.retrieval_compare_extra_k
     merged: dict[str, RetrievalChunk] = {}
     filters = build_version_filters(payload)
 
     for subquery in subqueries:
-        query_vector = embedding_provider.embed([subquery])[0]
+        query_vector = embedding_provider.embed_queries([subquery])[0]
         statement = (
             select(DocumentChunk, ChunkEmbedding, Document, DocumentVersion)
             .join(ChunkEmbedding, ChunkEmbedding.document_chunk_id == DocumentChunk.id)
@@ -532,6 +555,7 @@ def graph_search(
 def merge_contexts(
     vector_contexts: list[RetrievalChunk],
     graph_contexts: list[RetrievalChunk],
+    lexical_contexts: list[RetrievalChunk],
 ) -> list[RetrievalChunk]:
     merged: dict[str, RetrievalChunk] = {context.chunk_id: context for context in vector_contexts}
 
@@ -562,6 +586,23 @@ def merge_contexts(
             }
         )
 
+    for context in lexical_contexts:
+        existing = merged.get(context.chunk_id)
+        if existing is None:
+            merged[context.chunk_id] = context
+            continue
+        lexical_score = context.final_score if context.final_score is not None else context.score
+        current_score = existing.final_score if existing.final_score is not None else existing.score
+        boosted_score = min(1.0, current_score * 0.88 + lexical_score * 0.12)
+        merged[context.chunk_id] = existing.model_copy(
+            update={
+                "score": boosted_score,
+                "final_score": boosted_score,
+                "retrieval_source": "hybrid" if existing.retrieval_source != "lexical" else "lexical",
+                "query_path": merge_entities(existing.query_path, context.query_path),
+            }
+        )
+
     return list(merged.values())
 
 
@@ -576,6 +617,8 @@ def rerank_contexts(
         provenance_bonus = 0.04 if context.source.section_path else 0.0
         compare_bonus = 0.08 if intent == "compare" and len(context.query_path) > 0 else 0.0
         temporal_bonus = 0.05 if intent == "temporal" and context.source.page is not None else 0.0
+        short_chunk_penalty = chunk_length_penalty(context.content)
+        richness_bonus = 0.03 if len(" ".join(context.content.split())) >= 240 else 0.0
         re_rank_score = min(
             1.0,
             (context.final_score or context.score) * 0.72
@@ -584,6 +627,7 @@ def rerank_contexts(
             + compare_bonus
             + temporal_bonus,
         )
+        re_rank_score = max(0.0, re_rank_score + richness_bonus - short_chunk_penalty)
         reranked.append(
             context.model_copy(update={"re_rank_score": re_rank_score, "final_score": re_rank_score})
         )
@@ -608,10 +652,12 @@ def lexical_fallback(
     db: Session,
     query_terms: list[str],
     intent: str,
+    limit: int | None = None,
 ) -> list[RetrievalChunk]:
     if not query_terms:
         return []
     filters = build_version_filters(payload)
+    candidate_limit = limit or payload.top_k
     statement = (
         select(DocumentChunk, Document, DocumentVersion)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -622,7 +668,7 @@ def lexical_fallback(
             *filters,
         )
         .order_by(DocumentChunk.chunk_index.asc())
-        .limit(payload.top_k + (settings.retrieval_compare_extra_k if intent == "compare" else 0))
+        .limit(candidate_limit + (settings.retrieval_compare_extra_k if intent == "compare" else 0))
     )
     rows = db.execute(statement).all()
     contexts = [
@@ -638,7 +684,7 @@ def lexical_fallback(
         for chunk, document, version in rows
     ]
     contexts = rerank_contexts(contexts, query_terms, intent)
-    return contexts[: payload.top_k]
+    return contexts[:candidate_limit]
 
 
 def merge_entities(left: list[str], right: list[str]) -> list[str]:
@@ -665,9 +711,18 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 def score_term_overlap(query_terms: list[str], content: str) -> float:
     if not query_terms:
         return 0.0
-    lowered = content.lower()
+    lowered = normalize_search_text(content)
     hits = sum(1 for term in query_terms if term in lowered)
     return hits / len(query_terms)
+
+
+def chunk_length_penalty(content: str) -> float:
+    compact = " ".join(content.split())
+    if len(compact) < SHORT_CONTEXT_CHAR_THRESHOLD:
+        return 0.16
+    if len(compact) < MEDIUM_CONTEXT_CHAR_THRESHOLD:
+        return 0.07
+    return 0.0
 
 
 def score_entity_overlap(entity_names: list[str], content: str) -> float:
