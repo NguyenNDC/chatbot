@@ -90,7 +90,7 @@ async def generate_answer(payload: GenerateAnswerRequest) -> GenerateAnswerRespo
             policy_summary=["no-answer", "grounded-answer-only", "cite-source-required"],
         )
 
-    selected_contexts = select_contexts(payload.contexts)
+    selected_contexts = select_contexts(payload.contexts, payload.retrieval_plan)
     if needs_clarification(payload, selected_contexts):
         return GenerateAnswerResponse(
             trace_id=str(uuid4()),
@@ -185,8 +185,16 @@ def choose_models() -> list[str]:
     return models
 
 
-def select_contexts(contexts: list[RetrievalChunk]) -> list[RetrievalChunk]:
-    budget = settings.llm_context_char_budget
+def select_contexts(
+    contexts: list[RetrievalChunk],
+    retrieval_plan: dict | None = None,
+) -> list[RetrievalChunk]:
+    plan = retrieval_plan or {}
+    route_budget = plan.get("max_context_chars")
+    try:
+        budget = max(settings.llm_context_char_budget, min(int(route_budget), 30_000))
+    except (TypeError, ValueError):
+        budget = settings.llm_context_char_budget
     selected: list[RetrievalChunk] = []
     used_chars = 0
     seen_chunks: set[str] = set()

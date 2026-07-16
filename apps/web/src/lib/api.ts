@@ -1,6 +1,22 @@
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000").replace(/\/$/, "");
 
-export type QueryMode = "auto" | "lookup" | "summary" | "compare" | "temporal";
+export type QueryMode =
+  | "auto"
+  | "lookup"
+  | "summary"
+  | "compare"
+  | "temporal"
+  | "exact_lookup"
+  | "specific_regulation"
+  | "conditions"
+  | "procedure"
+  | "scope"
+  | "permission"
+  | "penalty"
+  | "quote"
+  | "document_review"
+  | "statistics"
+  | "error_lookup";
 
 export type TenantRecord = {
   id: string;

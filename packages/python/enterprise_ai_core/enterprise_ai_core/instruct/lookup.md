@@ -1,0 +1,1 @@
+Đây là câu hỏi tra cứu chung. Trả lời trực tiếp từ các chunk có điểm và nguồn tốt nhất. Không suy diễn chính sách, điều khoản, ngày tháng hoặc quyền hạn ngoài bằng chứng. Nếu nguồn không đủ, trả lời thiếu bằng chứng.

@@ -12,6 +12,7 @@ from enterprise_ai_core.db import get_db_session
 from enterprise_ai_core.embedding import get_embedding_provider
 from enterprise_ai_core.graphdb import get_neo4j_client
 from enterprise_ai_core.models import ChunkEmbedding, Document, DocumentChunk, DocumentVersion
+from enterprise_ai_core.routing import classify_query
 from enterprise_ai_core.schemas import Citation, QueryRequest, RetrievalChunk
 
 router = APIRouter(tags=["retrieval"])
@@ -50,7 +51,8 @@ MEDIUM_CONTEXT_CHAR_THRESHOLD = 180
 
 @router.post("/retrieve")
 async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session)) -> dict:
-    intent = classify_intent(payload)
+    route = classify_query(payload.question, payload.query_mode)
+    intent = route.intent
     subqueries = build_subqueries(payload.question, intent)
     query_terms = normalize_terms(" ".join(subqueries))
     vector_contexts = vector_search(payload, db, subqueries, intent)
@@ -64,7 +66,7 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
     try:
         graph_contexts = (
             graph_search(payload, query_terms, db, intent)
-            if payload.include_graph and graph_search_available(payload.tenant_id, db)
+            if payload.include_graph and route.include_graph and graph_search_available(payload.tenant_id, db)
             else []
         )
     except Exception:
@@ -91,11 +93,11 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
         source = "lexical-fallback" if contexts else "empty"
 
     retrieval_plan = {
-        "intent": intent,
+        **route.as_dict(),
         "query_mode": payload.query_mode,
         "subqueries": subqueries,
         "vector_top_k": payload.top_k,
-        "graph_expansion": payload.include_graph,
+        "graph_expansion": payload.include_graph and route.include_graph,
         "graph_hops": min(3, max(1, settings.retrieval_graph_hops)),
         "graph_candidates": len(graph_contexts),
         "re_ranker": "heuristic-hybrid-rerank",
@@ -106,18 +108,9 @@ async def retrieve(payload: QueryRequest, db: Session = Depends(get_db_session))
 
 
 def classify_intent(payload: QueryRequest) -> str:
-    if payload.query_mode != "auto":
-        return payload.query_mode
-    lowered = payload.question.lower()
-    if any(term in lowered for term in {"so sanh", "compare", "khac nhau", "giong nhau"}):
-        return "compare"
-    if any(
-        term in lowered for term in {"hieu luc", "het hieu luc", "ngay", "thoi diem", "bao gio"}
-    ):
-        return "temporal"
-    if any(term in lowered for term in {"tom tat", "summary", "tong quan"}):
-        return "summary"
-    return "lookup"
+    """Backward-compatible wrapper for callers that only need the intent name."""
+
+    return classify_query(payload.question, payload.query_mode).intent
 
 
 def build_subqueries(question: str, intent: str) -> list[str]:
@@ -153,10 +146,18 @@ def normalize_search_text(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9\s]", " ", without_marks).split())
 
 
-def build_version_filters(payload: QueryRequest) -> list:
+def build_version_filters(payload: QueryRequest, intent: str = "lookup") -> list:
     filters = []
     if payload.version_ids:
         filters.append(DocumentVersion.id.in_(payload.version_ids))
+    elif intent == "temporal" and payload.effective_at is None:
+        # Temporal questions need historical versions as well as the current one.
+        filters.append(
+            or_(
+                DocumentVersion.is_current.is_(True),
+                DocumentVersion.effective_to.is_not(None),
+            )
+        )
     else:
         filters.append(DocumentVersion.is_current.is_(True))
     if payload.document_ids:
@@ -415,7 +416,7 @@ def vector_search(
     if intent == "compare":
         vector_limit += settings.retrieval_compare_extra_k
     merged: dict[str, RetrievalChunk] = {}
-    filters = build_version_filters(payload)
+    filters = build_version_filters(payload, intent)
 
     for subquery in subqueries:
         query_vector = embedding_provider.embed_queries([subquery])[0]
@@ -501,7 +502,7 @@ def graph_search(
     if not doc_support:
         return []
 
-    filters = build_version_filters(payload)
+    filters = build_version_filters(payload, intent)
     statement = (
         select(DocumentChunk, Document, DocumentVersion)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -656,15 +657,26 @@ def lexical_fallback(
 ) -> list[RetrievalChunk]:
     if not query_terms:
         return []
-    filters = build_version_filters(payload)
+    filters = build_version_filters(payload, intent)
     candidate_limit = limit or payload.top_k
+    title_match_intents = {
+        "summary",
+        "temporal",
+        "exact_lookup",
+        "specific_regulation",
+        "quote",
+        "document_review",
+    }
+    content_conditions = [DocumentChunk.content.ilike(f"%{term}%") for term in query_terms[:5]]
+    if intent in title_match_intents:
+        content_conditions.extend(Document.title.ilike(f"%{term}%") for term in query_terms[:5])
     statement = (
         select(DocumentChunk, Document, DocumentVersion)
         .join(Document, Document.id == DocumentChunk.document_id)
         .join(DocumentVersion, DocumentVersion.id == DocumentChunk.document_version_id)
         .where(
             DocumentChunk.tenant_id == payload.tenant_id,
-            or_(*[DocumentChunk.content.ilike(f"%{term}%") for term in query_terms[:5]]),
+            or_(*content_conditions),
             *filters,
         )
         .order_by(DocumentChunk.chunk_index.asc())

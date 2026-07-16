@@ -414,7 +414,24 @@ class ChatMessageListResponse(BaseModel):
 class ChatSendMessageRequest(BaseModel):
     tenant_id: str
     message: str
-    query_mode: Literal["auto", "lookup", "summary", "compare", "temporal"] = "auto"
+    query_mode: Literal[
+        "auto",
+        "lookup",
+        "summary",
+        "compare",
+        "temporal",
+        "exact_lookup",
+        "specific_regulation",
+        "conditions",
+        "procedure",
+        "scope",
+        "permission",
+        "penalty",
+        "quote",
+        "document_review",
+        "statistics",
+        "error_lookup",
+    ] = "auto"
     top_k: int = 6
     include_graph: bool = True
     include_summaries: bool = True
@@ -432,7 +449,24 @@ class QueryRequest(BaseModel):
     top_k: int = 6
     include_graph: bool = True
     include_summaries: bool = True
-    query_mode: Literal["auto", "lookup", "summary", "compare", "temporal"] = "auto"
+    query_mode: Literal[
+        "auto",
+        "lookup",
+        "summary",
+        "compare",
+        "temporal",
+        "exact_lookup",
+        "specific_regulation",
+        "conditions",
+        "procedure",
+        "scope",
+        "permission",
+        "penalty",
+        "quote",
+        "document_review",
+        "statistics",
+        "error_lookup",
+    ] = "auto"
     document_ids: list[str] = Field(default_factory=list)
     version_ids: list[str] = Field(default_factory=list)
     effective_at: datetime | None = None
